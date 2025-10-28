@@ -1,0 +1,632 @@
+﻿Token Activation Map to Visually Explain Multimodal LLMs
+
+Yi Li, Hualiang Wang, Xinpeng Ding, Haonan Wang, Xiaomeng Li!
+Department of Electronic and Computer Engineering, The Hong Kong University of Science and Technology, Hong Kong SAR, China.
+
+{ylini,xmli}@ust.hk
+
+Abstract Context tokens (    ) can interfere 
+with the explained token (    ).
+
+CNN / ViT Vision Text 
+endoder endoder K
+
+Multimodal large language models (MLLMs) are broadly
+A output A ouput about 
+
+empowering various fields. Despite their advancements, the for classes vocabularies (CLIP)
+
+... Q
+explainability of MLLMs remains less explored, hindering Vision-to-vision
+
+deeper understanding, model credibility, and effective visu- Multimodal endoder Tokenizer
+
+alization. Unlike conventional vision models (e.g., CNNs, Large language model
+
+ViTs, CLIP) that produce a single output, MLLMs generate Multiple ... Text-to-vision
+generated tokens
+
+sequences of tokens progressively, where each generated to- Text-to-text corelation
+(a) Conventional models vs. MLLMs (b) Information flow of MLLM (c) Correlated activations
+
+ken depends on the previous context. Therefore, earlier con-
+text tokens can introduce redundant activations that inter- ① ① ①
+
+fere with the explanation of later tokens beyond their orig- ② ② ②
+
+inal information. Existing studies often overlook this issue, ③ ③ ③
+
+but our observations reveal that these redundant correla-
+tions can significantly hurt the reliability of explanations.
+To address this, we propose an estimated causal inference (d) Qualitative example of interference activations (e) TAM (ours) for MLLM explanation
+
+method to mitigate the interference of context to achieve Figure 1. Illustration of Motivation. (a) MLLMs generate multiple
+high-quality MLLM explanation, with a novel rank Gaus- tokens beyond a single output. (b) The information flow indicates
+sian filter to further reduce activation noises. We term this that MLLM generates tokens progressively, where one generated
+method Token Activation Map (TAM) to highlight the con- token (each row) is correlated with the context (prompt + earlier
+sideration of interactions between tokens. TAM also indi- answer tokens). (c) We randomly pair CAMs and count their L1
+cates that it excels at explaining multiple tokens of MLLM, distance against text correlation. Higher text correlation corre-
+which is different from the Class Activation Map (CAM) for sponds to lower distance, indicating concurrent interferences. (d)
+a single prediction. Our TAM method significantly outper- The example shows that the context token “plate” introduces inter-
+forms existing SoTA methods, showcasing high-quality vi- ference activations (marked by white boxes) to the later explained
+sualization results that can be utilized for various scenar- token “fork”. (e) Our TAM reveals the original information of the
+ios, such as object localization, failure case analysis, video explained token “fork”, eliminating context interferences and be-
+
+yond CAM for a single output in (d). Results in (c, d, e) derive
+visualization, MLLMs visual comparison, and model under- from Qwen2-VL-2B on the COCO Caption dataset.
+standing (e.g., color, shape, action, location, visual reason-
+ing, multi-turn conversation, etc). The code is available at
+github.com/xmed-lab/TAM. understanding, case analysis, and visualization. However,
+
+exploring the explainability of MLLMs is more challeng-
+1. Introduction ing than conventional visual models (such as CNN [24],
+
+ViT [23], CLIP [41]), where MLLMs progressively gener-
+Multimodal large language models (MLLMs or Multimodal ate multiple tokens beyond a single output as Fig. 1a. Thus,
+LLMs) increasingly empower wide applications [17, 29, we aim to explain all tokens of MLLM, revealing the visual
+30, 34], enabling multimodal inputs (e.g., images, videos, cues via token-level activation maps (e.g., Fig. 1e).
+text) and human-like conversations. Although extensive ef- Current MLLM explanation works [7, 48, 55] are gen-
+forts have been devoted to enhancing the performance of erally borrowed from techniques [38, 45] for conventional
+MLLMs [4, 16, 35, 47, 51], research on MLLM explainabil- models. For example, LLaVA-CAM [55] uses Smooth
+ity remains less explored. It is crucial for user trust, model Grad-CAM++ [38] to explain LLaVA [35]. The self-
+
+1
+
+arXiv:2506.23270v1  [cs.CV]  29 Jun 2025
+
+L1 distance of text-to-vision (CAM) pairs
+
+Tex
+t-to
+
+-te
+xt
+
+
+
+attention weights [49] are applied to understand math COCO Caption dataset [13]. Besides quantitative results,
+problem-solving [48]. Besides, LVLM-Interpret [7] inte- we conduct qualitative experiments to understand MLLM
+grates some conventional methods as a tool. Unfortunately, attributes about color, shape, action, location, etc. Further-
+existing visual explainability methods are designed for con- more, we illustrate that TAM is capable of explaining failure
+ventional models [23, 24, 41] that produce a single output, cases on the QK-VQA dataset. [37], and it supports video
+such as class activation maps (CAM) series [9, 26, 45, 56], visualization well on the STAR dataset [52]. In addition, it
+attention-based approaches [1, 28], attention with relevance can be used as a tool to visually compare MLLMs qualita-
+[2, 11], model-agnostic methods [36, 43], or multimodal ex- tively. Moreover, TAM shows wide applicability to explain
+planation [3, 19, 31, 32]. However, these methods over- multi-turn conversations, multi-image scenarios, and visual
+look that MLLMs generate multiple tokens progressively, reasoning (see the catalog Table 5 in supplementary for ex-
+where earlier context tokens interfere with later tokens to tensive examples). Our work has three main contributions:
+be explained. As shown in Fig. 1d, the conventional CAM • We introduce TAM, a novel approach to explain MLLMs,
+[56] for the token “fork” is confounded by numerous redun- which produces high-quality activation maps for multiple
+dant activations concurrent with the token “plate” in context generative tokens by incorporating the estimated causal
+(context refers to prompt and earlier answer tokens than the inference to alleviate interference from context tokens,
+explained token). Quantitative analysis in Fig. 1c reveals with the rank Gaussian filter to reduce activation noises.
+that this issue is widespread, where correlated tokens lead to • TAM significantly outperforms current methods for
+close and interference activations. These interferences ob- MLLM explanation, while also complementing them.
+scure the original information conveyed by the explained to- • TAM demonstrates wide applicability and scalability,
+ken, significantly degrading the explainability of MLLMs. serving as a versatile tool for object localization, model
+Notably, this activation interference across tokens is unique understanding, failure case analysis, video visualization,
+to MLLMs and has been overlooked. MLLM comparison, and supporting diverse scenarios
+
+We aim to reveal the original information for the ex- (e.g., multi-turn, multi-image, visual reasoning).
+plained token while minimizing interference from context,
+as discussed above. Herein, the original information re- 2. Related Work
+veals a causal relation [40] between the current token and Visual Explainability for Multimodal LLM. The emer-
+the input, while the interferences represent the correlations gence of MLLMs such as LLaVA [35], Qwen2-VL [51],
+that need to be excluded. Inspired by the potential outcome InternVL [15], and closed-source GPT-4o [25] has signif-
+model (POM) of causal inference [27], we propose the esti- icantly impacted various tasks involing multimodal inputs
+mated causal inference to explore this causal relation. Un- like text, images, and video. We mainly focus on the vi-
+like raw causal inference by comparing ready-made results sual explanation of MLLMs via the activation maps for
+(yes vs. no), there is no single given output to represent the input image or video frames. Regarding the modal-
+the “no” result. Therefore, we estimated interferences from ity perspective, the explainability of MLLMs is partially
+multiple context tokens that are highly related to the target, related to methods to explain multimodal models such as
+with a scale factor optimized by the least-squares method CLIP Surgery [32] and transformer register [19] designed
+to generate the refined causal activation map. We also pro- for CLIP [41]; InterpreT [3] and Bi-Modal [10] for BERT
+pose a novel rank Gaussian filter to reduce noises, thereby [20]. From the technical aspect, conventional explanation
+further enhancing the quality of activation maps. The above methods are also related, including class activation map se-
+methods are collectively referred to as token activation map ries (CAM [56], Grad-CAM [45], Grad-CAM++ [9], Lay-
+(TAM), emphasizing the consideration of interactions be- erCAM [26]), attention-based mechanisms (LRP [28], Roll-
+tween tokens. TAM also indicates that it excels at explain- out [1]), the combination (AttnLRP [2], Grad→AttnRoll
+ing tokens in multiple rounds of MLLM, which differs from [11]), or model-agnostic methods (LIME [43], SHAP [36]).
+the Class Activation Map (CAM) for a single prediction. Although existing methods may be valid to explain
+
+Experimentally, the proposed TAM demonstrates quanti- MLLMs, they are not the optimal solution. Because they are
+tative improvement over existing SoTA explainability meth- usually designed for conventional models (e.g., CNN [24],
+ods by more than 8.96% on the COCO Caption dataset [13] ViT [23], CLIP [41]) that produce a single output rather
+and 8.54% on the OpenPSG dataset [57] when applied to than generating multiple tokens progressively in MLLMs.
+visually explain the Qwen2-VL-2B [51]. Meanwhile, it We have observed that these earlier context tokens inter-
+is complementary to existing methods to boost their per- fere with later tokens by introducing redundant visual ac-
+formance. We further verify the scalability and applica- tivations, as shown in Fig. 1. This phenomenon is first
+bility on 7 advanced MLLMs from the series of Qwen2- studied by us, solved by a novel estimated causal inference
+VL [51], InternVL2 5 [15] and LLaVA1 5 [35], where the method, which is specially designed for MLLM. Notably,
+performance improvements range from 5.45% to 11.0% on some workshop papers (LLaVA-CAM [55] and LVLM-
+
+2
+
+
+
+Interpret [7]) applied conventional methods [38, 44] to ex- evaluations of the explanations for MLLMs.
+plain LLaVA [35], but they also overlooked the interference
+from context tokens and treated each token independently. 3.1. Token Activation Map
+Causal Model. Causal inference [54] seeks to establish TAM aims to dipect explainable activation maps for mul-
+causal relation [40] between variables, focusing on how tiple tokens generated from MLLMs by leveraging causal
+changes in one variable influence another. In contrast to sta- inference to mitigate inter-token interference. To be more
+tistical correlation analysis, it emphasizes causal relations. specific, given the visual data and prompt text as the input,
+Another related concept, causal intervention [27], involves the MLLM is employed to progressively generate the visual
+manipulating variables using a do operator. Model-agnostic features F v ↑ Rnv→c, prompt features F p ↑ Rnp→c and
+explainability methods, such as LIME [43] and SHAP [36], answer features F a ↑ Rna→c. nv , np, na and c indicate
+can be viewed as causal interventions that explore the rela- the number of three type of features, and the feature dimen-
+tionship between inputs and structured outputs by masking sion, respectively. Next, a token classifier, instantiated as
+inputs or selecting subsets [12]. This concept is also applied a fully connected layer, is used to generate answer tokens
+to transformers through token masking (CLEANN [44]) or ta = { a a
+
+t1 ... tn } from these features. Prompt tokens are de-
+a
+
+hidden state replacement [39]. However, causal interven- fined as tp = { p p
+t1 ... tn } similarly. Based on the variables
+
+p
+tion for MLLMs is impractical. Because there are too many described above, the visual activation maps for the prompt
+input tokens are outputs in MLLM, requiring unbearable in- tokens and answer tokens are calculated as follows:
+ference times. Besides, modified input leads to a changed
+context every inference, which is hard to evaluate. Our Ap
+
+i = ↓F vwtp↔+, i ↑ [1, np]
+i (1)
+
+method is inspired by the potential outcome model (POM) Aa
+i = ↓F vwta↔+, i ↑ [1, na],i
+
+to achieve causal inference without additional model infer-
+ences. Our contribution lies in estimating the unprocessed where Ap
+
+i ↑ Rnv→1 and Aa
+i ↑ Rnv→1 present the activa-
+
+output from multiple tokens rather than a single ready-made tion map for the i-th prompt token p
+ti and answer token a
+
+ti .
+output, considering the uniqueness of MLLMs. wtp ↑ Rc→1 and wta ↑ Rc→1 are the corresponding weight
+
+i i
+
+Transformer Denoising. Activation maps of transformers vectors within the token classifier. ↓↔+ is the function to
+[49] usually present many noise activations, impeding high- keep positive activations.
+quality visualization. Recent studies give their explanations Then, the activation maps for prompt and answer tokens
+about it, including attention sink [53], lack of register [19], are concatenated (↗) as A:np+na = Ap↗Aa. For the i-th
+and redundant features across classes [32]. In MLLM, these answer token, its context token is formulated as A:np+i↑1,
+noises still exist obversely, even system tokens already play including all earlier context maps (prompt tokens + answer
+the role of registers, or deploying the feature surgery to miti- tokens earlier than i). On top of it, the refined activation
+gate redundant features (See Table 2). To solve this problem maps for answer tokens are formulated as follows:
+practically, we aim to introduce denoising filters to mitigate a
+it as post-processing. Since these noises belong to salt-and- Āi = ↓D(Aa
+
+i ↘ sE(A:np+i↑1))↔+, i ↑ [1, na], (2)
+pepper noise morphologically, we apply the median filter,
+adaptive median filter [8], and the Gaussian filter. How- where a
+
+Āi indicates the refined activation map for the i-
+ever, these filters are not the optimal solution, where the th answer token. The number of i increases sequentially
+
+from 1 to na. Aa
+Gaussian filter keeps too much noise signal and the median i ↘ sE(A:np+i↑1) is the proposed esti-
+filter overlooks smaller responses. Therefore, we propose mated causal inference that produces the causal activation
+the rank Gaussian filter, a novel, simple, and effective filter map with the estimation function E described in Sec. 3.2.
+to denoise transformer activation. It merges ranked values D is the proposed rank Gaussian filter module in Sec. 3.3.
+within a sliding window, weighted summed by a 1-d Gaus- In the last, we concatenate (↗) the refined visual activa-
+sian kernel with the center at the median rank. Besides, we tion map a
+
+Āi of the i-th answer token with the raw textual
+relevance ri ↑ Rnp+i↑1
+
+improve the Gaussian kernel by the coefficient of variation for a multimodal activation map
+(image or video with text) M i ↑ Rnv+np+i↑1
+
+for more robust results. Overall, our method addresses the as follows:
+activation noises in a practical aspect through a new filter. a
+
+M i = N (Āi↗ri), i ↑ [1, na], (3)
+3. Method where N () is a min-max normalization function for visual-
+In this section, we first provide an overview of the proposed izing visual and textual activations at an aligned level.
+Token Activation Map (TAM), as illustrated in Fig. 2. Next,
+we elaborate on two key modules within TAM: the esti- 3.2. Estimated Causal Inference
+mated causal inference and the rank Gaussian filter. Finally, Overall, Eq. 2 optimizes later visual activation maps based
+we introduce three metrics designed to enable fine-grained on visual activation maps of all earlier context tokens. To
+
+3
+
+
+
+conventional raw activation maps Obj-IoU
+models
+
+...
+② ②
+
+① ①
+
+ Causal activation maps
+visual features        classifer      current     
+
+weights answer token       the current map                  context maps Evaluate activation map of
+σ std objects with given masks
+
+substract
+
+Estimated Causal Func-IoU
+s
+
+Inference (see b) μ mean cleaned output 
+normalized from noise (    )
+
+the causal scaled estimated
+          activation maps textual Ai:i+k,j:j+k  
+
+activation map inter. map interference map relevance local values 
+ai,j  ranked Gi (ai,j, k) custom
+
+values 1-d Gaussian kernel
+ri  textual Repeating for all pixels
+relevance
+
+D( ) Rank Evaluate function words with
+Gaussian ... assigned background mask
+
+Filter (see c) 
+Mi  the multimodal         the refined
+
+activation map activation maps
+
+Repeating to expain all answer tokens (                ) The causal activation map (visualized via Mi )       The refined activation map The major overall metric
+
+(a) Token Activation Map (TAM) to explain MLLMs (b) Estimated Causal Inference of TAM (c) Rank Gaussian Filter of TAM (d) Evaluation Metrics
+
+Figure 2. Illustration of method. (a, Eq. 1 - Eq. 3) The overall framework of TAM. (b, Eq. 4 - Eq. 5) Details of the estimated casual
+inference module. (d, Eq. 6 - Eq. 7) Details of the rank Gaussian filter module. (d, Eq. 8 - Eq. 10) Fine-grained evaluation metrics.
+
+be more specific, causal inference is employed to investigate maps. To address this issue, we will elaborate on the solu-
+the correct causal relation between the current answer token tion in the following section.
+and visual tokens, eliminating interferences from prompt to-
+kens and preceding answer tokens. To this end, we quantify 3.3. Rank Gaussian Filter
+the interference map from the context tokens for the i-th As described in Sec. 2 the activation noise exists obviously
+answer token as follows: and belongs to the salt-and-pepper type. Different from ex-
+
+n isting methods [19, 32] with suboptimal performances on
+p∑+i↑1 k
+
+E ∑ r
+(A MLLM, we address this problem in an new aspect: image
+
+:np+i↑1) =
+i Ak
+
+r + ω denoising. Compared with existing filters like the Gaussian
+k=1 i (4)
+
+k filter that keeps too much noise signal and the median fil-
+s.t. ri = 0, if a
+
+ti = tk, ter which overlooks smaller responses, our rank Gaussian
+where k
+
+ri is the textual relevance between the k-th con- filter is more robust beyond existing methods. The overall
+text token tk and the current answer token a
+
+ti . The rel- equation of the rank Gaussian filter for any activation map
+evance is obtained from activations among textual tokens Ai,j ↑ Rh→w is written as:
+↓(F p↗F a)wta↔+ following Eq. 1. If the current context ∑
+
+i
+
+token tk is the same as the answer token a
+ti , we set their D(Ai,j , k) = Ai,jG(ai,j , k), ≃i ↑ H , ≃j ↑ W
+
+(6)
+relevance as 0, i.e., k
+
+ri = 0, to avoid eliminating visual acti- s.t. ai,j = rank(Ai:i+k,j:j+k).
+vations for tokens identical to the current answer token.
+
+Overall, Eq. 4 aims for each answer token to encapsulate Herein, Ai:i+k,j:j+k indicates local values within a sliding
+more visual information, which implies minimizing simi- window at kernel size k. We sort them to get a ranked array
+larity to the visual semantics of previously context tokens. to multiply with a custom 1-d Gaussian kernel G(). This
+Meanwhile, we use the scale factor s in Eq. 2 to control the custom kernel allows the median to have the largest weight,
+scale of the interference map, ensuring that the influence meanwhile aggregating signals ranked close to the median.
+of the interference map is removed from the activation map It can be regarded as a kind of smoothed median filter to
+at a comparable degree. Specifically, we employ the least enhance the robustness weighted by the Gaussian kernel.
+squares method to minimize the residual between the two For the custom 1-d Gaussian kernel, we formulate it as
+maps, for the optimal value of s, as follows: Eq. 7. Specifically, (i ↘ 2
+
+k //2)2 indicates the distance
+from the median rank ( 2
+
+k //2, size exact division 2), and
+∑nv ( ε(a)/µ(a) is the coefficient of variation which is more sta-
+
+s = argmin Aa ( ))
+j,i ↘ sE 2
+
+Aj,:np+i↑1 . (5)
+s ble than the standard division ε() in general Gaussian ker-
+
+j=1 nel using the mean µ() only.
+After processing by the estimated causal inference mod-
+
+ule, there are still many salt-and-pepper noises in activation G ↑ (i→k2//2)2
+
+i(a, k) = e 2(ω(a)/µ(a))2 2
+, ≃i ↑ k (7)
+
+4
+
+MLLMs
+
+
+
+3.4. Evaluation for MLLM Explanation masks from COCO2014 [33]. Since explainability methods
+Unlike conventional models with a single output, MLLMs require testing only, we use its 5K-image minival split with-
+generate multiple tokens. To evaluate how well activa- out training. Additional datasets include GranDf [42] (1K
+tion maps correspond to objects, we propose two fine- images) and OpenPSG [57] (3,176-image validation set).
+grained IoU-based metrics: Obj-IoU for objects with man- Masks in COCO Caption and GranDf are manually anno-
+ual masks, and Func-IoU for backgrounds. These metrics tated, while OpenPSG masks are integrated by Rasheed et
+focus on plausibility instead of faithfulness (see concept dif- al. [42]. For datasets without masks, we perform qualita-
+ferences in Supp. E). Plausibility better suits MLLMs since tive visualization tests (Sec. 4.3), including attribute-only
+perturbation-based faithfulness tests [2, 11] which cause in- images and the QK-VQA [37] validation set (5,046 VQA
+consistent text generation, making evaluation invalid (see samples with textual answers). We also qualitatively evalu-
+detailed reasons in Supp. E). ate the STAR video dataset [52] (914 videos).
+
+To be specific, we formulate Obj-IoU in Eq. 8, count- Implementations. We use the SciPy minimize function
+ing the IoU between activation map (Ai) after binarization with the BFGS method to optimize the scale factor s in Eq.
+(B() using opencv OTSU auto threshold) and the ground- 5. The only hyperparameter, the kernel size k in Eq. 7, is set
+truth mask Gi. Since the object classes may be unfixed, we to 3, as our observations indicate that salt-and-pepper noises
+count the IoU for all tokens at size o over the dataset with- typically cluster between 1 to 5 tokens. A kernel size of 3,
+out an average on classes. We obtain the mask by matching consisting of 9 elements, is deemed suitable. Eq. 9 incorpo-
+the token to mask names. For a word or phrase containing rates part-of-speech identification. For Func-IoU and Obj-
+multiple tokens, we record their max IoU for a single object. IoU, we tag each word’s part of speech using the pos tag
+
+function from the NLTK Python package (version 3.8.1, see
+o
+
+1 ∑ B(A tag details in Supp. E). For word matching to mask names,
+Obj-IoU i) →Gi
+
+= (8)
+o B(A
+
+i= i) ↑G we employ the lemmatize function from nltk.stem. Note
+1 i
+
+Func-IoU measures the activation degree of tokens that that the thresholds in Eq. 8 and Eq. 9 are automatically de-
+are unreadable from the image (e.g., “is”, “and”, “so”, rived from OpenCV’s OTSU method, requiring no manual
+“the”). Higher Func-IoU indicates fewer false positives and operation. Details of the baselines are provided in Supp. D.
+unnecessary responses. Specifically, we record the mean bi- 4.2. Quantitative Results
+narization thresholds bi (opencv OTSU auto threshold) for
+all noun tokens in the same image to divide foreground and ECI RGF Obj-IoU (%) Func-IoU (%) F1-IoU (%)
+background on function words. Activation map lower than ✁ ✁ 21.23 51.93 30.14
+it ✂ ✁ 22.41 69.03 33.84
+(A +3.7
+
+i < bi) is the background prediction used to count IoU ✁ ✂ 24.82 43.34 31.57+1.33
+with the all-one matrix J (ground-truth is all background ✂ ✂ 27.37 68.44 39.1+8.96
+class). It is applied to total u tokens over the whole dataset. Table 1. Ablation study on the COCO Caption [13] dataset using
+
+u
+1 ∑ (A Qwen2-VL-2B [51]. These two modules are mutually beneficial,
+
+Func-IoU i < bi) → J
+= (9)
+
+u (A the combination exceeds the sum of their individual gains. ECI
+i= i < b
+
+1 i) ↑ J
+indicates the proposed estimated causal inference, and RGF is the
+
+We try to merge the above IoUs as the overall major rank Gaussian filter. Metrics are IoU for object words, IoU for
+metrics. We find their average is insufficient to measure function words, and their F1-score-like combination, respectively.
+biased and low-quality activation maps. For example, if
+one method predicts almost all tokens to be background, the Setting Obj-IoU (%) Func-IoU (%) F1-IoU (%)
+
+Obj-IoU is very low but Func-IoU is high, forming a certain Baseline 21.23 51.93 30.14
+Replace rank Gaussian filter
+
+inverse ratio (e.g., 5.74% vs. 96.5% of Attention-Rollout Adaptive Median [8] 25.48 68.2 37.1
+[1] in Table 3). One suitable solution is to use the F1 value Median Filter 26.01 68.26 37.67
+to merge metrics with a certain inverse ratio. Thus, we have Gaussian Filter 26.56 67.78 38.16
+
+the F1-IoU to evaluate the overall plausibility stably: Replace estimated causal inference
+Feature surgery [32] 18.5 48.66 26.81
+
+ECI-mean 27.84 49.85 35.72
+2 → Obj-IoU→ Func-IoU
+
+F1-IoU= (10) ECI-attnWeights 27.11 54.61 36.23
+Obj-IoU+ Func-IoU Ours 27.37 68.44 39.1
+
+4. Experiments Table 2. Effectiveness study on the COCO Caption [13] dataset
+using Qwen2-VL-2B [51]. ECI-mean and ECI-attnWeights are
+
+4.1. Setup candidate implementations of ECI described in Supp. D.
+Datasets. For quantitative experiments, we use datasets Ablation and Effectiveness. We present the ablation study
+with texts and pixel-level annotations. Our main dataset is results in Table 1, which indicates that each module of the
+the COCO Caption dataset [13], which draws images and TAM is valuable. Specifically, the estimated causal infer-
+
+5
+
+
+
+Method Type COCO Caption GranDf OpenPSG
+Obj-IoU Func-IoU F1-IoU Obj-IoU Func-IoU F1-IoU Obj-IoU Func-IoU F1-IoU
+
+Grad-CAM [45] 21.23 51.93 30.14 17.85 62.15 27.74 22.93 48.57 31.15
+Grad-CAM++ [9] Gradient 19.52 62.83 29.78 17.3 73.42 28.01 22.21 59.95 32.41
+Grad-Rollout [1] 1.27 99.51 2.51 1.4 99.61 2.77 1.57 99.58 13.08
+Layer-CAM [26] 11.43 84.88 20.15 13.11 82.09 22.62 14.12 85.29 24.22
+
+Attention Attention 8.2 92.87 15.07 9.6 93.56 17.42 10.58 94.28 19.03
+Attention-Rollout [1] 5.74 96.5 10.83 7.21 96.65 13.42 7.94 97.04 14.68
+
+CP-LRP [5]
+Attn-LRP [2] Combination 9.9 53.97 16.73 12.61 53.24 20.39 13.3 53.36 21.3
+
+9.92 52.41 16.69 12.15 52.19 19.72 12.78 52.26 20.54
+CAM [56] 21.23 51.93 30.14 17.85 62.15 27.74 22.93 48.57 31.15
+
+Archi.-Surgery [32] Logit 15.69 63.82 25.19 16.59 62.28 26.2 19.83 58.77 29.65
+TAM (ours) 27.37 68.44 39.1 18.65 88.97 30.83 26.26 92.99 40.95
+
+Archi.-Surgery [32] +4.13 +10.68 +6.12 +1.41 +26.48 +3.74 +1.59 +31.92 +5.0
+Grad-CAM++ [9] + Ours +2.83 +3.91 +3.7 +1.26 +5.39 +2.04 +2.75 +9.44 +4.3
+Layer-CAM [26] +5.04 -7.95 +6.98 +2.79 +0.52 +4.05 +6.62 -2.49 +8.95
+
+CAM [56] +6.14 +16.52 +8.96 +0.79 +26.82 +3.09 +3.33 +44.42 +9.8
+
+Table 3. Comparison with SoTA methods using Qwen2-VL-2B on diverse datasets. We adopt the “Logit” type that uses the classifier
+weights in Eq. 1, without back-propagation in “Gradient” and “Combination” (Gradient + Attention). Besides, we support FlashAttention
+[18] and SdpaAttention, which do not return attention weights, while “Attention” and “Combination” rely on it. Our TAM is also comple-
+mentary to existing methods with gains marked by “+”. Note, CAM and Grad-CAM are equivalent as discussed in Supp. D. The major
+metric is the F1-IoU (%) to reflect the overall result, merged from IoUs for Object words (Obj-IoU) and function words (Func-IoU).
+
+CAM [56] +Ours COCO Caption GranDf OpenPSG
+Obj-IoU Func-IoU F1-IoU Obj-IoU Func-IoU F1-IoU Obj-IoU Func-IoU F1-IoU
+
+LLaVA1 5-7B [35] +4.47 +18.27 +7.97 +0.65 +11.67 +2.47 +3.47 +9.51 +5.16
+LLaVA1 5-13B [35] +4.3 +7.31 +5.45 +0.76 +7.03 +2.11 +4.22 +11.51 +6.37
+InternVL2 5-2B [16] +5.44 +19.48 +8.57 +2.2 +48.29 +8.47 +3.24 +40.45 +8.65
+InternVL2 5-4B [16] +3.53 +22.17 +7.14 +1.62 +45.19 +7.56 +2.2 +55.05 +10.85
+InternVL2 5-8B [16] +5.38 +2.13 +6.93 +3.53 +28.53 +7.02 +3.27 +26.54 +6.44
+Qwen2-VL-2B [51] +6.14 +16.52 +8.96 +0.79 +26.82 +3.09 +3.33 +44.49 +9.8
+Qwen2-VL-7B [51] +5.62 +29.4 +11.01 +1.29 +22.54 +3.4 +3.53 +46.94 +11.15
+Mean Improvements +4.98 +16.47 +8.01 +1.55 +27.15 +4.88 +3.32 +33.5 +8.35
+
+Table 4. Explainability improvements of TAM on diverse MLLMs and datasets. Specific results are listed in Table 6 of Supp. K.
+
+ence significantly improves Func-IoU by reducing context mains low. The second-best method is Grad-CAM++ [9] on
+interference on function words, while the rank Gaussian the COCO Caption [13] and OpenPSG [57] datasets, while
+filter performs better for object words. Importantly, these CAM [56] and Grad-CAM [45] rank second on GranDf
+modules are mutually beneficial; their combination leads to [42]. Our method surpasses these approaches by 8.96%,
+an F1-IoU improvement of 8.96%, exceeding the total of 2.82%, and 8.54% on these datasets, respectively. Further-
+their individual contributions (3.7% and 1.33%). more, TAM is complementary to existing methods and en-
+
+We further assess the effectiveness of these modules by hances them significantly, with maximum gains of 6.62%,
+comparing them with other methods, as shown in Table 2. 44.42%, and 9.8% across the three metrics, respectively.
+Replacing our proposed rank Gaussian filter with alterna- Applicability and Scalability. We evaluate the applicabil-
+tives yields lower performance, such as the adaptive median ity on three prominent MLLMs, as shown in Table 4, and
+filter [8], the Gaussian filter, and the median filter. Although assess its scalability across various model sizes. The results
+the differences are less pronounced than those seen with the in Table 3 indicate that TAM consistently outperforms the
+causal inference module, denoising remains a challenging baseline across all MLLMs and model sizes by significant
+area. Our method outperforms feature surgery [32] (which margins. This demonstrates that TAM can be effectively
+operates on the class dimension) by 12.29% and also sur- applied to a range of MLLMs while providing superior ex-
+passes other ECI implementations in Supp. D. plainability compared to existing methods. Moreover, TAM
+Comparison with SoTA Methods. Table 3 presents a com- supports MLLMs comparison, complementing quantitative
+parison between TAM and SoTA methods. Our TAM out- results. It introduces a new evaluation perspective by high-
+performs all others in the major F1-IoU and Obj-IoU met- lighting visual alignment quality, as illustrated in Fig. 8.
+rics. While some methods, such as Grad-Rollout [1] and At-
+tention, achieve high Func-IoU by producing a limited num- 4.3. Qualitative Results
+ber of activations, their performance on other metrics re- Comparison of Explainability Methods.
+
+6
+
+
+
+Ground-Truth CAM / Grad-CAM Grad-CAM++ Grad-RollOut Layer-CAM Attention Attention-Rollout CP-LRP Attn-LRP Archi-Surgery TAM (ours)
+
+Figure 3. Visual comparison between TAM and SoTA methods on the COCO Caption dataset [13] using the Qwen2-VL-2B [51] model.
+The “is” in the last row is a functional word with background ground-truth. More examples are shown in Supp. G including complex cases.
+
+Color Shape
+
+Action Number
+
+Low High
+Location Text
+
+Figure 4. TAM presents high-quality localization results on di- Figure 5. TAM supports to explain and analyze diverse attributes
+verse datasets [13, 42, 57] under the Qwen2-VL-7B [51] model. of MLLM (Qwen2-VL-7B). See extensive examples in Supp. M.
+
+We perform comparisons between the proposed TAM
+and SoTA explanation methods, as illustrated in Fig. 3. plications in the medical field [21, 50], which require pixel-
+The visualization results clearly show that TAM more ac- level activations.
+curately highlights target objects and renders fewer false Visualization for Various Attributes. We apply TAM to
+activations on function words. In contrast, attention-based explain various attributes of MLLMs, specifically focusing
+methods [1, 2, 5] produce only a limited number of acti- on fine-grained token types as Fig. 5. The results indicate
+vations, while gradient-based methods [9, 45] present too that TAM effectively supports the explanation of attributes
+many correlated responses and noise, performing signifi- such as color, shape, action, number, location, and text.
+cantly worse than our approach. Additionally, we present Notably, the representation of numbers is less pronounced
+more complex examples in Supp. G, where TAM notably compared to object localization, suggesting that some at-
+outperforms existing SoTA methods. TAM excels at ex- tributes may be encoded within related object tokens. In
+plaining multiple tokens of MLLMs. In Supp. C, results contrast, other attributes are more prominently featured.
+show how TAM focuses on important tokens, whereas the Explaining Failure Cases. We apply TAM to analyze fail-
+baseline methods generate many redundant activations. ure cases in the QK-VQA dataset [37] as Fig. 7. Our find-
+High-quality Localization Results. We visualized the re- ings indicate that while the model successfully locates ob-
+sults using the multimodal activation map in Eq. 3 (see de- jects, it struggles to align them with specific knowledge.
+tailed examples in Supp. B). The results demonstrate that For instance, the model can identify the desert and focus
+TAM effectively locates objects across diverse datasets, as on the key prompt (“year”) when outputting “don’t know.”
+shown in Fig. 4. These findings indicate that TAM enhances It suggests a misalignment between the desert and the year,
+MLLMs with localization capabilities, which could be po- rather than recognition or prompt issues. Besides, some re-
+tentially beneficial for various downstream tasks, including sponses consist of synonyms, hypernyms, or hyponyms of
+segmentation [32], object counting [46], anomaly detection the correct answers, resulting in mismatches. For more case
+[14], image editing [6], autonomous driving [22], and ap- studies, please refer to the catalog in Supp. Table 5.
+
+7
+
+cpu motorcycle is (Func.) COCO Caption GranDf OpenPSG
+
+
+
+CAM / Grad-CAM TAM (ours)
+
+Figure 6. TAM significantly improves the quality of video visualization, with much fewer redundant activation and noises on STAR [52]
+dataset using Qwen2-VL-2B [51]. Please see extensive examples in Supp. 27 and failure cases analysis for videos in Fig. 25.
+
+additional cost. As shown in Fig. 8, Qwen2-VL-7B [51]
+shows greater explainability than LLaVA1 5-7B [35] and
+InternVL2 5-8B [16]. Furthermore, we observe that In-
+ternVL tends to focus more on text, resulting in weaker
+activation levels; in some cases, this performance is even
+better than that of LLaVA (e.g., with the broccoli). More
+
+synonyms of answers vision-text alignment (desert type) additional knowledge (toilet lid) extensive examples can be found in Supp. K.
+
+Figure 7. TAM supports failure cases analysis on QK-VQA [37].
+See more cases in Supp. about VQA (Fig. 24), videos (Fig. 25), 5. Conclusion
+visual reasoning (Fig. 28), and multi-turn conversation (Fig. 31).
+
+This work focuses on the unique nature of MLLMs in visual
+explainability, which generates multiple tokens progres-
+sively, complicating the explanation process. In response,
+we introduced the Token Activation Map (TAM), a novel
+method that utilizes estimated causal inference to mitigate
+interferences from context tokens, with a rank Gaussian fil-
+ter to reduce activation noise, thereby providing clearer vi-
+sual explanations. Our results demonstrate that TAM signif-
+icantly outperforms existing SoTA methods, offering high-
+quality visualizations applicable to diverse scenarios.
+
+Despite the success, we focus on visual inputs, other
+modalities, such as audio, remain under-explored. Addi-
+tionally, interpreting model decisions is an extensible fur-
+ther aspect. The potential applications of our TAM method
+are extensive, including open-vocabulary segmentation, de-
+
+Figure 8. TAM enables qualitative comparison among MLLMs. tection, image grounding, anomaly detection, remote sens-
+Extensive examples are given in Fig. 17 and Fig. 18 in Supp. K. ing, and medical fields that require pixel-level activations.
+
+Our work lays a foundation for advancing their explainabil-
+ity and practical utility across various domains.
+
+Video Visualization. The proposed TAM excels at video
+visualization, where there are much fewer redundant activa- Acknowledgment
+tions and noises as shown in Fig. 6. Our method provides
+very clear results, while the conventional CAM makes it This work was supported by a research grant from the
+hard to see the video content without obvious highlights. Joint Research Scheme (JRS) under the National Natu-
+A Tool to Visually Comparison MLLMs. TAM can be ral Science Foundation of China (NSFC) and the Re-
+used as a tool to compare MLLMs qualitatively. If an search Grants Council (RGC) of Hong Kong (Project No.
+MLLM exhibits superior activation maps, it can be inferred N HKUST654/24), as well as a grant from the RGC of the
+that its explainability and degree of vision alignment are Hong Kong Special Administrative Region, China (Project
+also better, offering valuable pixel-level predictions at no No. R6005-24).
+
+8
+
+InternVL2_5 LLaVA1_5 QWen2-VL
