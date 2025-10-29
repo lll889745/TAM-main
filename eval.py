@@ -366,7 +366,7 @@ def eval_qwen2vl(model_name='Qwen/Qwen2-VL-2B-Instruct', input_data=None, mode_s
         inputs = processor(text=batch_texts, images=batch_images, padding=True, return_tensors="pt")
         inputs = inputs.to(model.device)
 
-        with torch.inference_mode():
+        with torch.no_grad():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
@@ -375,7 +375,11 @@ def eval_qwen2vl(model_name='Qwen/Qwen2-VL-2B-Instruct', input_data=None, mode_s
                 return_dict_in_generate=True
             )
 
-        logits = [model.lm_head(states[-1]).to(torch.float32).cpu() for states in outputs.hidden_states]
+        logits = []
+        for states in outputs.hidden_states:
+            last_hidden = states[-1].detach()
+            step_logits = model.lm_head(last_hidden).to(torch.float32).cpu()
+            logits.append(step_logits)
         generated_ids = outputs.sequences.cpu()
         input_lengths = [len(seq) for seq in inputs.input_ids]
         generated_ids_trimmed = [generated_ids[i, input_lengths[i]:].tolist() for i in range(generated_ids.size(0))]
