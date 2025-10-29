@@ -492,7 +492,7 @@ def main():
     except:
         vis_path = ''
 
-    input_data = prepare_input(dataset_path)
+    input_data = prepare_input(dataset_path)[:1000]
     #input_data = input_data[:100] # vis partial examples
     
     # eval different models (their inference and token ids are different)
