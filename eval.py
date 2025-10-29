@@ -1,4 +1,4 @@
-import os, sys, cv2, json, random
+import os, sys, cv2, json, random, argparse, gc, torch
 from PIL import Image
 import numpy as np
 from nltk.corpus import wordnet as wn
@@ -9,59 +9,85 @@ import nltk
 from tqdm import tqdm
 from nltk.translate import meteor_score
 from nltk.stem import WordNetLemmatizer
-from rouge import Rouge
-import warnings
+def _summarize_metrics(metrics_collection):
+    if not metrics_collection:
+        return [0.0] * 6
+
+    summary = []
+    for idx in range(len(metrics_collection[0])):
+        values = []
+        for sample_metrics in metrics_collection:
+            values.extend(sample_metrics[idx])
+        if values:
+            summary.append(sum(values) / len(values))
+        else:
+            summary.append(0.0)
+    return summary
 
 
-# prepare
-random.seed(1024)
-warnings.filterwarnings("ignore")
+def main():
+    parser = argparse.ArgumentParser(description='Evaluate multimodal explanation quality.')
+    parser.add_argument('model_name')
+    parser.add_argument('dataset_path')
+    parser.add_argument('legacy_vis_path', nargs='?', default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--vis-path', dest='vis_path_opt', default=None,
+                        help='Directory to save visualizations (optional).')
+    parser.add_argument('--processed-input', default='',
+                        help='Use a preprocessed input JSON file inside dataset_path.')
+    parser.add_argument('--sample-limit', type=int, default=0,
+                        help='Limit number of samples for faster evaluation.')
+    parser.add_argument('--batch-size', type=int, default=1,
+                        help='Batch size for model inference (images only).')
+    parser.add_argument('--modes', default=None,
+                        help='Comma separated interference modes (e.g., haci,eci,haci:obj_att=0).')
+    parser.add_argument('--reso', type=int, default=-1,
+                        help='Resize shorter image side to this value before processing.')
+    parser.add_argument('--max-new-tokens', type=int, default=256,
+                        help='Maximum new tokens to generate.')
 
-if not os.path.exists(os.path.join(os.path.expanduser("~"), 'nltk_data/taggers/averaged_perceptron_tagger.zip')):
-    nltk.download('averaged_perceptron_tagger')
+    args = parser.parse_args()
 
+    vis_path = args.vis_path_opt if args.vis_path_opt is not None else (args.legacy_vis_path or '')
+    limit = args.sample_limit if args.sample_limit > 0 else None
+    batch_size = max(1, args.batch_size)
 
-def get_word_type(word):
-    """
-    Determine the general word type of a given word using NLTK's POS tagging.
+    input_data = prepare_input(args.dataset_path, processed_input=args.processed_input, limit=limit)
+    if len(input_data) == 0:
+        print('No input data found. Please check dataset path or processed input file.')
+        return
 
-    Args:
-        word (str): A single word to be classified.
+    mode_specs = _parse_mode_specs(args.modes)
 
-    Returns:
-        str: A category label for the word type:
-             - 'function' for function words (e.g., pronouns, determiners, conjunctions)
-             - 'noun' for noun forms (singular, plural, proper)
-             - 'others' for all other POS tags
-             
-    Note:
-        Tags like 'IN' (prepositions) and 'CD' (cardinal numbers) are excluded from the 'function' category 
-        for better readability.
-    """
+    if 'Qwen' in args.model_name:
+        results_dict = eval_qwen2vl(
+            model_name=args.model_name,
+            input_data=input_data,
+            mode_specs=mode_specs,
+            batch_size=batch_size,
+            vis_path=vis_path,
+            reso=args.reso,
+            max_new_tokens=args.max_new_tokens,
+        )
 
-    tagged_word = nltk.pos_tag([word])
-    pos = tagged_word[0][1]
-    
-    if pos in ['CC', 'DT', 'EX', 'MD', 'POS', 'PRP', 'PRP$', 'UH', 'WDT', 'WP', 'WP$', 'WRB']:
-        return 'function'
-    elif pos in ['NN', 'NNS', 'NNP', 'NNPS']:
-        return 'noun'
+        for label, _, _ in mode_specs:
+            metrics_collection = results_dict.get(label, [])
+            summary = _summarize_metrics(metrics_collection)
+            obj_iou, func_iou, rouge_l, meteor, precision, recall = summary
+            f1_iou = (2 * obj_iou * func_iou / (obj_iou + func_iou)) if (obj_iou + func_iou) > 0 else 0.0
+            print('[%s] Obj-IoU: %.6f, Func-IoU: %.6f, F1-IoU: %.6f, ROUGE-L: %.6f, METEOR: %.6f, Precision: %.6f, Recall: %.6f' \
+                  % (label, obj_iou, func_iou, f1_iou, rouge_l, meteor, precision, recall))
+
+    elif 'llava' in args.model_name:
+        results = eval_llava(args.model_name, input_data, vis_path)
+        summary = _summarize_metrics(results)
+        obj_iou, func_iou, rouge_l, meteor, precision, recall = summary
+        f1_iou = (2 * obj_iou * func_iou / (obj_iou + func_iou)) if (obj_iou + func_iou) > 0 else 0.0
+        print('Obj-IoU: %.6f, Func-IoU: %.6f, F1-IoU: %.6f, ROUGE-L: %.6f, METEOR: %.6f, Precision: %.6f, Recall: %.6f' \
+              % (obj_iou, func_iou, f1_iou, rouge_l, meteor, precision, recall))
+    elif 'InternVL' in args.model_name:
+        print('The models use their own codebase, not released to simplify our code.')
     else:
-        return 'others'
-
-
-def is_english_punctuation(char):
-        return char in string.punctuation
-
-
-def is_chinese_char_or_punctuation(char):
-    for ch in char:
-        if 'CJK' in unicodedata.name(ch, ''):
-            return True
-    return False
-
-
-def ids_to_word_groups(ids, processor):
+        print('Unsupported model. Please provide implementation if needed.')
     """
     Decode token ids into grouped words and record the corresponding token indices.
 
@@ -255,79 +281,148 @@ def evaluate(maps, tokens, processor, caption, mask, category):
     return [obj_iou, func_iou, rougel, meteor, pre, rec]
 
 
-def eval_qwen2vl(model_name='Qwen/Qwen2-VL-2B-Instruct', input_data=[], vis_path='', reso=-1):
-    """
-    Evaluate the visual exaplainability of Qwen2-VL and visualize each token and example.
+def _parse_mode_specs(modes_str, default_mode="haci"):
+    if modes_str:
+        entries = [entry.strip() for entry in modes_str.split(',') if entry.strip()]
+    else:
+        env_mode = os.environ.get('TAM_INTERFERENCE_MODE', default_mode)
+        entries = [env_mode]
 
-    Args:
-        model_name (str): Pretrained model identifier or path.
-        input_data (list): List of tuples containing (image or video, prompt text, caption, mask, category).
-        vis_path (str): Directory path to save visualized token activation maps. If empty, visualizations are not saved.
-        reso (int): Optional resolution to resize input images; ignored if <= 0 or input is video.
+    specs = []
+    for entry in entries:
+        raw_label = entry
+        base = entry
+        config = {}
+        if ':' in entry:
+            base, options = entry.split(':', 1)
+            for opt in options.split(','):
+                opt = opt.strip()
+                if not opt:
+                    continue
+                if '=' in opt:
+                    key, value = opt.split('=', 1)
+                else:
+                    key, value = opt, '0'
+                mapped = MODE_OPTION_MAP.get(key.strip().lower())
+                if mapped:
+                    config[mapped] = value.strip().lower() not in FALSE_STRINGS
+        base_mode = base.strip().lower()
+        if base_mode not in {'haci', 'eci', 'none'}:
+            base_mode = 'haci'
+    specs.append((raw_label, base_mode, config))
+    return specs
 
-    Returns:
-        list: A list of evaluation metric dictionaries, one per input sample.
-    """
 
-    # load model
+def eval_qwen2vl(model_name='Qwen/Qwen2-VL-2B-Instruct', input_data=None, mode_specs=None,
+                  batch_size=1, vis_path='', reso=-1, max_new_tokens=256):
+    """Evaluate Qwen2-VL with optional batching and multi-mode interference reuse."""
+
+    if input_data is None:
+        input_data = []
+    if mode_specs is None or len(mode_specs) == 0:
+        mode_specs = [(os.environ.get('TAM_INTERFERENCE_MODE', 'haci'),
+                       os.environ.get('TAM_INTERFERENCE_MODE', 'haci'), {})]
+
     from qwen_utils import process_vision_info
     from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
 
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_name, torch_dtype="auto", device_map="auto")
+    model.eval()
     processor = AutoProcessor.from_pretrained(model_name)
 
-    results = []
-    for sample_id, (img, prompt, caption, mask, category) in enumerate(tqdm(input_data, unit='sample')):
-        # QWen preprocess
-        if isinstance(img, list):
-            messages = [{"role": "user", "content": [{"type": "video", "video": img}, {"type": "text", "text": prompt}]}]
-        else:
-            messages = [{"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": prompt}]}]
-        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        image_inputs, video_inputs = process_vision_info(messages)
-        if reso > 0 and not isinstance(img, list):
-            image_inputs[0] = resize(image_inputs[0], reso)
-        inputs = processor(text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
-        inputs = inputs.to("cuda")
-        
-        # compute logists (CAM) via feat (last hidden state) @ class weights (lm_head). Note: output_logits=True don't return vision logits.
-        outputs = model.generate(**inputs, max_new_tokens=256, use_cache=True, output_hidden_states=True, return_dict_in_generate=True)
-        logits = [model.lm_head(feats[-1]) for feats in outputs.hidden_states]
-        
-        generated_ids = outputs.sequences
-        generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
+    total_samples = len(input_data)
+    if total_samples == 0:
+        return {label: [] for label, _, _ in mode_specs}
 
-        # set path and inputs
-        if vis_path != '':
+    results = {label: [] for label, _, _ in mode_specs}
+
+    special_ids = {'img_id': [151652, 151653],
+                   'prompt_id': [151653, [151645, 198, 151644, 77091]],
+                   'answer_id': [[198, 151644, 77091, 198], -1]}
+
+    for batch_start in tqdm(range(0, total_samples, batch_size), unit='batch', desc='batches'):
+        batch_items = input_data[batch_start: batch_start + batch_size]
+
+        batch_texts = []
+        batch_images = []
+        batch_vis_inputs = []
+        batch_meta = []  # (img, caption, mask, category)
+
+        for img, prompt, caption, mask, category in batch_items:
             if isinstance(img, list):
-                save_dir = os.path.join(vis_path, str(sample_id) + '_' + img[0].split('/')[-2])
-            else:
-                save_dir = os.path.join(vis_path, str(sample_id) + '_' + img.split('/')[-1].split('.')[0])
-            os.makedirs(save_dir, exist_ok=True)
+                raise NotImplementedError('Batch inference for video inputs is not implemented. Set batch_size=1 for videos.')
+            messages = [{"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": prompt}]}]
+            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            image_inputs, _ = process_vision_info(messages)
+            if reso > 0:
+                image_inputs[0] = resize(image_inputs[0], reso)
 
-        vis_inputs = [[video_inputs[0][i] for i in range(0, len(video_inputs[0]), 2)]] if isinstance(img, list) else image_inputs
+            batch_texts.append(text)
+            batch_images.append(image_inputs[0])
+            batch_vis_inputs.append(image_inputs)
+            batch_meta.append((img, caption, mask, category))
 
-        # set special ids to locate vision tokens, prompt tokens and answer tokens. [start_id (int/list), end_id (int/list)]
-        special_ids={'img_id': [151652, 151653], 'prompt_id': [151653, [151645, 198, 151644, 77091]], 'answer_id': [[198, 151644, 77091, 198], -1]}
+        inputs = processor(text=batch_texts, images=batch_images, padding=True, return_tensors="pt")
+        inputs = inputs.to(model.device)
 
-        # get shape of vision output
-        if isinstance(img, list):
-            inputs['token_size'] = (inputs['video_grid_thw'][0, 0], inputs['video_grid_thw'][0, 1] // 2, inputs['video_grid_thw'][0, 2] // 2)
-        else:
-            inputs['token_size'] = (inputs['image_grid_thw'][0, 1] // 2, inputs['image_grid_thw'][0, 2] // 2)
+        with torch.inference_mode():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                use_cache=True,
+                output_hidden_states=True,
+                return_dict_in_generate=True
+            )
 
-        # explain MLLM progressively, draw token activation maps for each round (i is the round idx).
-        img_maps, raw_vis_records = [], []
-        for i in range(len(logits)):
-            # apply TAM to generate the maps and save them if vis_path != "".
-            img_map = TAM(generated_ids[0].cpu().tolist(), inputs['token_size'], logits, special_ids, vis_inputs, processor, \
-                          os.path.join(save_dir, str(i) + '.jpg') if vis_path != '' else '', i, raw_vis_records, False)
-            img_maps.append(img_map)
+        logits = [model.lm_head(states[-1]).to(torch.float32).cpu() for states in outputs.hidden_states]
+        generated_ids = outputs.sequences.cpu()
+        input_lengths = [len(seq) for seq in inputs.input_ids]
+        generated_ids_trimmed = [generated_ids[i, input_lengths[i]:].tolist() for i in range(generated_ids.size(0))]
+        token_sizes = inputs['image_grid_thw'].cpu().tolist()
 
-        # quantitative evaluation
-        metrics = evaluate(img_maps, generated_ids_trimmed, processor, caption, mask, category)
-        results.append(metrics)
+        for idx, (img, caption, mask, category) in enumerate(batch_meta):
+            sample_tokens = generated_ids[idx].tolist()
+            trimmed_tokens = generated_ids_trimmed[idx]
+            vision_shape = (token_sizes[idx][1] // 2, token_sizes[idx][2] // 2)
+            vis_inputs = batch_vis_inputs[idx]
+            sample_logits = [step[idx:idx + 1] for step in logits]
+
+            for mode_label, base_mode, haci_cfg in mode_specs:
+                img_scores_history = []
+                img_maps = []
+
+                mode_save_dir = ''
+                if vis_path:
+                    base_name = os.path.splitext(os.path.basename(img))[0]
+                    safe_label = mode_label.replace(':', '__').replace(',', '_').replace('=', '-')
+                    sample_dir = os.path.join(vis_path, safe_label, f"{batch_start + idx}_{base_name}")
+                    os.makedirs(sample_dir, exist_ok=True)
+                    mode_save_dir = sample_dir
+
+                for round_idx in range(len(sample_logits)):
+                    save_path = os.path.join(mode_save_dir, f"{round_idx}.jpg") if mode_save_dir else ''
+                    img_map = TAM(
+                        sample_tokens,
+                        vision_shape,
+                        sample_logits,
+                        special_ids,
+                        vis_inputs,
+                        processor,
+                        save_path,
+                        round_idx,
+                        img_scores_history,
+                        False,
+                        interference_mode=base_mode,
+                        haci_config=haci_cfg if base_mode == 'haci' else None
+                    )
+                    img_maps.append(img_map)
+
+                metrics = evaluate(img_maps, [trimmed_tokens], processor, caption, mask, category)
+                results[mode_label].append(metrics)
+
+        del outputs, logits
+        gc.collect()
 
     return results
 
@@ -387,7 +482,7 @@ def eval_llava(model_name='llava-hf/llava-1.5-7b-hf', input_data=[], vis_path=''
     return results
 
 
-def prepare_input(dataset_path, processed_input=''):
+def prepare_input(dataset_path, processed_input='', limit=None):
     """
     Prepare input data for image captioning or description tasks based on the dataset type.
 
@@ -421,7 +516,8 @@ def prepare_input(dataset_path, processed_input=''):
 
     input_data = []
     if processed_input != '':
-        return json.load(open(os.path.join(dataset_path, processed_input)))
+        data = json.load(open(os.path.join(dataset_path, processed_input)))
+        return data if limit is None else data[:limit]
 
     elif 'coco' in dataset_path:
         seg_anno = json.load(open(os.path.join(dataset_path, 'annotations/instances_minival2014.json')))
@@ -450,6 +546,9 @@ def prepare_input(dataset_path, processed_input=''):
             input_data.append([os.path.join(dataset_path, _[0]), defualt_prompt, \
                 [_[1]], os.path.join(dataset_path, _[2]), _[3]])
 
+
+    if limit is not None:
+        input_data = input_data[:limit]
 
     return input_data
 
