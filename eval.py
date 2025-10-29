@@ -9,6 +9,154 @@ import nltk
 from tqdm import tqdm
 from nltk.translate import meteor_score
 from nltk.stem import WordNetLemmatizer
+from rouge import Rouge
+
+
+FALSE_STRINGS = {'0', 'false', 'no', 'off', 'disable', 'disabled'}
+MODE_OPTION_MAP = {
+    'obj_att': 'use_object_attention',
+    'object_attention': 'use_object_attention',
+    'object-attention': 'use_object_attention',
+    'attribute': 'include_attribute_layer',
+    'attr': 'include_attribute_layer',
+    'func': 'include_functional_layer',
+    'functional': 'include_functional_layer',
+    'gate': 'use_layer_gating',
+    'gating': 'use_layer_gating',
+}
+
+FUNCTION_WORDS = {
+    'a', 'an', 'the', 'of', 'to', 'in', 'on', 'and', 'or', 'but', 'with', 'without', 'for',
+    'from', 'by', 'as', 'at', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'it', 'its',
+    'he', 'she', 'they', 'them', 'his', 'her', 'their', 'this', 'that', 'these', 'those',
+    'there', 'here', 'which', 'who', 'whom', 'whose', 'what', 'when', 'where', 'why', 'how',
+    'into', 'onto', 'up', 'down', 'over', 'under', 'again', 'further', 'then', 'once', 'if', 'because',
+    'until', 'while', 'about', 'between', 'through', 'during', 'before', 'after', 'above', 'below',
+    'out', 'off', 'over', 'under', 'again', 'more', 'most', 'other', 'some', 'such', 'nor', 'not',
+    'only', 'own', 'same', 'so', 'than', 'too', 'very', 'can', 'will', 'just', 'don', "don't",
+}
+
+CHINESE_PUNCTUATION = {
+    '，', '。', '！', '？', '：', '；', '（', '）', '【', '】', '「', '」', '、', '《', '》', '～', '——'
+}
+
+_NLTK_READY = False
+
+
+def _ensure_nltk_ready():
+    global _NLTK_READY
+    if _NLTK_READY:
+        return
+    resources = [
+        ('corpora/wordnet', 'wordnet'),
+        ('tokenizers/punkt', 'punkt'),
+        ('taggers/averaged_perceptron_tagger', 'averaged_perceptron_tagger'),
+    ]
+    for path, name in resources:
+        try:
+            nltk.data.find(path)
+        except LookupError:
+            nltk.download(name, quiet=True)
+    _NLTK_READY = True
+
+
+def is_english_punctuation(word):
+    if not word:
+        return False
+    return all(ch in string.punctuation for ch in word)
+
+
+def is_chinese_char_or_punctuation(word):
+    if not word:
+        return False
+    for ch in word:
+        if ch in CHINESE_PUNCTUATION:
+            return True
+        code = ord(ch)
+        if 0x4E00 <= code <= 0x9FFF:
+            return True
+    return False
+
+
+def get_wordnet_pos(tag):
+    if tag.startswith('J'):
+        return wn.ADJ
+    if tag.startswith('V'):
+        return wn.VERB
+    if tag.startswith('N'):
+        return wn.NOUN
+    if tag.startswith('R'):
+        return wn.ADV
+    return wn.NOUN
+
+
+FUNCTION_TAG_PREFIXES = ('PRP', 'PRP$', 'WDT', 'WP', 'WP$', 'DT', 'IN', 'TO', 'CC', 'MD', 'UH', 'RP', 'EX')
+NOUN_TAG_PREFIXES = ('NN', 'NNP', 'NNS', 'NNPS')
+
+
+def get_word_type(word):
+    token = (word or '').strip()
+    if not token:
+        return 'other'
+    lowered = token.lower()
+    if lowered in FUNCTION_WORDS or is_english_punctuation(token):
+        return 'function'
+
+    _ensure_nltk_ready()
+    try:
+        tag = nltk.pos_tag([token])[0][1]
+    except LookupError:
+        tag = 'NN'
+
+    if any(tag.startswith(prefix) for prefix in FUNCTION_TAG_PREFIXES):
+        return 'function'
+    if any(tag.startswith(prefix) for prefix in NOUN_TAG_PREFIXES):
+        return 'noun'
+    return 'other'
+
+
+def ids_to_word_groups(ids, processor):
+    """
+    Decode token ids into grouped words and record the corresponding token indices.
+
+    Args:
+        ids (list[int]): List of token ids to decode.
+        processor: Tokenizer processor with `batch_decode` and `tokenizer` attributes.
+
+    Returns:
+        tuple:
+            - words (list[str]): List of decoded word groups.
+            - tokens_idx (list[list[int]]): List of lists containing token indices for each word group.
+
+    Notes:
+        - Groups tokens together based on whitespace, punctuation, and special token markers (e.g., '▁').
+        - Uses helper functions `is_english_punctuation` and `is_chinese_char_or_punctuation` to identify punctuation.
+        - Removes spaces in decoded words to form continuous word strings.
+    """
+
+    txt = processor.batch_decode(ids, skip_special_tokens=False)[0]
+    tokens = processor.tokenizer.tokenize(txt)
+    words, tokens_idx = [], []
+    for i, tok in enumerate(tokens):
+        decoded = processor.tokenizer.decode(processor.tokenizer.convert_tokens_to_ids(tok))
+        cleaned = decoded.replace(' ', '')
+        starts_new = (
+            i == 0
+            or is_english_punctuation(decoded)
+            or is_chinese_char_or_punctuation(decoded)
+            or decoded.startswith(' ')
+            or tok.startswith('▁')
+        )
+        if starts_new:
+            words.append(cleaned)
+            tokens_idx.append([i])
+        else:
+            words[-1] += cleaned
+            tokens_idx[-1].append(i)
+    return words, tokens_idx
+
+
+lemmatizer = WordNetLemmatizer()
 def _summarize_metrics(metrics_collection):
     if not metrics_collection:
         return [0.0] * 6
@@ -88,40 +236,9 @@ def main():
         print('The models use their own codebase, not released to simplify our code.')
     else:
         print('Unsupported model. Please provide implementation if needed.')
-    """
-    Decode token ids into grouped words and record the corresponding token indices.
-
-    Args:
-        ids (list[int]): List of token ids to decode.
-        processor: Tokenizer processor with `batch_decode` and `tokenizer` attributes.
-
-    Returns:
-        tuple:
-            - words (list[str]): List of decoded word groups.
-            - tokens_idx (list[list[int]]): List of lists containing token indices for each word group.
-
-    Notes:
-        - Groups tokens together based on whitespace, punctuation, and special token markers (e.g., '▁').
-        - Uses helper functions `is_english_punctuation` and `is_chinese_char_or_punctuation` to identify punctuation.
-        - Removes spaces in decoded words to form continuous word strings.
-    """
-
-    txt = processor.batch_decode(ids)[0]
-    tokens = processor.tokenizer.tokenize(txt)
-    words, tokens_idx = [], []
-    for i, _ in enumerate(tokens):
-        word = processor.tokenizer.decode(processor.tokenizer.convert_tokens_to_ids(_))
-        if i == 0 or is_english_punctuation(word) or is_chinese_char_or_punctuation(word) or word[0] == ' ' or _[0] == '▁':
-            words.append(word.replace(' ', ''))
-            tokens_idx.append([i])
-        else:
-            words[-1] += word.replace(' ', '')
-            tokens_idx[-1].append(i)
-    return words, tokens_idx
 
 
 # match the same word (avoid to minus the same object)
-lemmatizer = WordNetLemmatizer()
 def single_words_match(word1, word2):
     a = lemmatizer.lemmatize(word1.lower().replace('-', ''))
     b = lemmatizer.lemmatize(word2.lower().replace('-', ''))
@@ -390,7 +507,7 @@ def eval_qwen2vl(model_name='Qwen/Qwen2-VL-2B-Instruct', input_data=None, mode_s
             trimmed_tokens = generated_ids_trimmed[idx]
             vision_shape = (token_sizes[idx][1] // 2, token_sizes[idx][2] // 2)
             vis_inputs = batch_vis_inputs[idx]
-            sample_logits = [step[idx:idx + 1] for step in logits]
+            sample_logits = [step[idx:idx + 1].contiguous() for step in logits]
 
             for mode_label, base_mode, haci_cfg in mode_specs:
                 img_scores_history = []
