@@ -184,6 +184,10 @@ def main():
                         help='Use a preprocessed input JSON file inside dataset_path.')
     parser.add_argument('--sample-limit', type=int, default=0,
                         help='Limit number of samples for faster evaluation.')
+    parser.add_argument('--sample-method', choices=['head', 'random'], default='head',
+                        help='How to choose samples when applying --sample-limit.')
+    parser.add_argument('--sample-seed', type=int, default=42,
+                        help='Random seed used when --sample-method=random.')
     parser.add_argument('--batch-size', type=int, default=1,
                         help='Batch size for model inference (images only).')
     parser.add_argument('--modes', default=None,
@@ -198,8 +202,14 @@ def main():
     vis_path = args.vis_path_opt if args.vis_path_opt is not None else (args.legacy_vis_path or '')
     limit = args.sample_limit if args.sample_limit > 0 else None
     batch_size = max(1, args.batch_size)
+    prep_limit = None if (limit and args.sample_method == 'random') else limit
 
-    input_data = prepare_input(args.dataset_path, processed_input=args.processed_input, limit=limit)
+    input_data = prepare_input(args.dataset_path, processed_input=args.processed_input, limit=prep_limit)
+    if args.sample_method == 'random' and limit is not None and limit < len(input_data):
+        rng = random.Random(args.sample_seed)
+        indices = rng.sample(range(len(input_data)), limit)
+        input_data = [input_data[i] for i in indices]
+
     if len(input_data) == 0:
         print('No input data found. Please check dataset path or processed input file.')
         return
