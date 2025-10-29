@@ -1,9 +1,14 @@
 import os, torch, cv2, subprocess, shutil
-import fitz
 import numpy as np
 import nltk
 from scipy.optimize import minimize_scalar
 from pathlib import Path
+
+
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
 
 
 _HACI_LAYER_OBJECT = "object"
@@ -349,9 +354,12 @@ def compile_latex_to_jpg(latex_code, path='word_colors.pdf', delete_aux_files=Tr
     """
 
     global _WARNED_XELATEX
-    if not _HAS_XELATEX:
+    if not _HAS_XELATEX or fitz is None:
         if not _WARNED_XELATEX:
-            print('Skip text visualization, xelatex is not available on this system.')
+            if not _HAS_XELATEX:
+                print('Skip text visualization, xelatex is not available on this system.')
+            else:
+                print('Skip text visualization, PyMuPDF (fitz) is not available on this system.')
             _WARNED_XELATEX = True
         return None
 
