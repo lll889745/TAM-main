@@ -17,6 +17,22 @@ _HACI_LAYER_FUNCTIONAL = "functional"
 _HACI_KNOWN_LAYERS = {_HACI_LAYER_OBJECT, _HACI_LAYER_ATTRIBUTE, _HACI_LAYER_FUNCTIONAL}
 
 
+def _env_flag(name, default=True):
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return str(val).lower() not in {"0", "false", "no"}
+
+
+_DEFAULT_INTERFERENCE_MODE = os.environ.get("TAM_INTERFERENCE_MODE", "haci").lower()
+_DEFAULT_HACI_CONFIG = {
+    "use_object_attention": _env_flag("TAM_HACI_OBJ_ATT", True),
+    "include_attribute_layer": _env_flag("TAM_HACI_ATTR", True),
+    "include_functional_layer": _env_flag("TAM_HACI_FUNC", True),
+    "use_layer_gating": _env_flag("TAM_HACI_GATE", True),
+}
+
+
 _HAS_XELATEX = shutil.which("xelatex") is not None
 _WARNED_XELATEX = False
 
@@ -136,7 +152,7 @@ def _linear_interference(maps, weights):
     return (stacked * weights[:, None]).sum(axis=0)
 
 
-def _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx):
+def _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx, haci_cfg):
     if current_idx >= len(txt_tokens):
         return None
 
@@ -168,6 +184,10 @@ def _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx):
         layer = entry.get("layer", _HACI_LAYER_FUNCTIONAL)
         if layer not in _HACI_KNOWN_LAYERS:
             layer = _HACI_LAYER_FUNCTIONAL
+        if layer == _HACI_LAYER_ATTRIBUTE and not haci_cfg.get("include_attribute_layer", True):
+            continue
+        if layer == _HACI_LAYER_FUNCTIONAL and not haci_cfg.get("include_functional_layer", True):
+            continue
         weight = float(txt_scores[idx]) if idx < len(txt_scores) else 0.0
         layer_maps[layer].append(entry["map"])
         layer_weights[layer].append(max(weight, 0.0))
@@ -178,7 +198,10 @@ def _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx):
             continue
         weights = layer_weights[layer]
         if layer == _HACI_LAYER_OBJECT:
-            interference_components[layer] = _object_attention_interference(maps, weights)
+            if haci_cfg.get("use_object_attention", True):
+                interference_components[layer] = _object_attention_interference(maps, weights)
+            else:
+                interference_components[layer] = _linear_interference(maps, weights)
         else:
             interference_components[layer] = _linear_interference(maps, weights)
 
@@ -187,10 +210,13 @@ def _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx):
 
     strengths = {layer: sum(layer_weights[layer]) for layer in interference_components}
     total_strength = sum(strengths.values())
-    if total_strength <= 1e-8:
-        gating = {layer: 1.0 / len(interference_components) for layer in interference_components}
+    if haci_cfg.get("use_layer_gating", True):
+        if total_strength <= 1e-8:
+            gating = {layer: 1.0 / len(interference_components) for layer in interference_components}
+        else:
+            gating = {layer: strengths[layer] / (total_strength + 1e-8) for layer in interference_components}
     else:
-        gating = {layer: strengths[layer] / (total_strength + 1e-8) for layer in interference_components}
+        gating = {layer: 1.0 / len(interference_components) for layer in interference_components}
 
     template = next(iter(interference_components.values()))
     total_interference = np.zeros_like(template)
@@ -198,6 +224,48 @@ def _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx):
         total_interference += gating[layer] * comp
 
     return total_interference
+
+
+def _compute_eci_interference(txt_tokens, txt_scores, img_store, current_idx):
+    if current_idx >= len(txt_tokens):
+        return None
+
+    target_token = txt_tokens[current_idx]
+    maps = []
+    weights = []
+    if len(txt_scores) < len(txt_tokens):
+        txt_scores = np.pad(txt_scores, (0, len(txt_tokens) - len(txt_scores)), constant_values=0.0)
+
+    for idx in range(current_idx):
+        entry = img_store[idx]
+        if entry is None or entry.get("map") is None:
+            continue
+        if idx < len(txt_tokens) and txt_tokens[idx] == target_token:
+            continue
+        maps.append(entry["map"])
+        weights.append(max(float(txt_scores[idx]), 0.0))
+
+    if not maps:
+        return None
+
+    weights = np.asarray(weights, dtype=np.float64)
+    if weights.sum() <= 1e-8:
+        weights = np.ones_like(weights) / len(weights)
+    else:
+        weights = weights / (weights.sum() + 1e-8)
+
+    return (np.stack(maps, axis=0) * weights[:, None]).sum(axis=0)
+
+
+def _compute_interference(mode, txt_tokens, txt_scores, img_store, current_idx, haci_cfg):
+    mode = (mode or "").lower()
+    if mode not in {"haci", "eci", "none"}:
+        mode = "haci"
+    if mode == "none":
+        return None
+    if mode == "eci":
+        return _compute_eci_interference(txt_tokens, txt_scores, img_store, current_idx)
+    return _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx, haci_cfg)
 
 
 def rank_guassian_filter(img, kernel_size=3):
@@ -649,11 +717,12 @@ def id2idx(inp_id, target_id, return_last=False):
 
 
 def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
-        processor, save_fn, target_token, img_scores_list, eval_only=False):
+    processor, save_fn, target_token, img_scores_list, eval_only=False,
+    interference_mode=None, haci_config=None):
 
     """
-    Generate a Token Activation Map (TAM) with Hierarchical and Adaptive Causal Inference (HACI)
-    and Rank Guassian Filter for high quality MLLM visual explaination.
+    Generate a Token Activation Map (TAM) with configurable causal interference modeling and
+    Rank Guassian Filter for high quality MLLM visual explaination.
 
     Args:
         tokens (list): The token sequence including input and generated tokens.
@@ -671,9 +740,12 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
         processor: The model processor to convert tokens to text.
         save_fn (str): File path to save the visualization image (optional).
         target_token (int or tuple): The token index or (round_idx, prompt_token_idx) to explain.
-        img_scores_list (list): Mutable list used by HACI to cache per-token activation maps and layers.
+        img_scores_list (list): Mutable list used to cache per-token activation maps and layers.
             Note: start with an empty list for the first round of each example.
         eval_only (bool): Whether to run in evaluation mode (affects visualization size).
+        interference_mode (str): 'haci' (default), 'eci', or 'none' to control interference modeling.
+        haci_config (dict): Optional overrides for HACI behaviour (use_object_attention,
+            include_attribute_layer, include_functional_layer, use_layer_gating).
 
     Returns:
         img_map (np.ndarray): The TAM for eval.
@@ -685,7 +757,7 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
     4. For round 0, recursively process all prompt tokens to generate maps.
     5. Extract the logits for the target token's predicted class and compute relevance scores 
        over prompt, answer, and image tokens.
-    6. Apply HACI to estimate and remove structured interference from earlier context tokens.
+    6. Apply the selected interference estimator to remove structured interference from earlier context tokens.
     7. Prepare vision input images or frames for visualization.
     8. Identify top candidate tokens to provide context in visualization.
     9. Call multimodal_process to generate the visual explanation map (TAM).
@@ -719,6 +791,12 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
     txt_all = prompt + answer
     token_layers = _assign_layers(txt_all)
 
+    if interference_mode is None:
+        interference_mode = _DEFAULT_INTERFERENCE_MODE
+    haci_cfg = dict(_DEFAULT_HACI_CONFIG)
+    if haci_config:
+        haci_cfg.update(haci_config)
+
     # round_idx indicates the round of generation, this_token_idx is for the exaplained target token
     round_idx = -1
     this_token_idx = 0
@@ -740,7 +818,8 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
         for t in range(len(prompt) + 1):
             # recursion to process prompt tokens
             img_map = TAM(tokens, vision_shape, logit_list, special_ids, vision_input, processor, \
-                          save_fn if t == len(prompt) else '', [0, t], img_scores_list, eval_only)
+                          save_fn if t == len(prompt) else '', [0, t], img_scores_list, eval_only,
+                          interference_mode=interference_mode, haci_config=haci_config)
 
             ## the first prompt token is used to reflect the differenec of activation degrees
             if t == 0:
@@ -792,7 +871,7 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
 
     interference = None
     if vis_token_idx < len(txt_all):
-        interference = _compute_haci_interference(txt_all, txt_scores, img_scores_list, vis_token_idx)
+        interference = _compute_interference(interference_mode, txt_all, txt_scores, img_scores_list, vis_token_idx, haci_cfg)
     if interference is not None and np.any(interference):
         scaled_map = least_squares(img_scores, interference)
         if not np.isfinite(scaled_map) or scaled_map < 0:
