@@ -1,8 +1,194 @@
 import os, torch, cv2, subprocess
 import fitz
 import numpy as np
+import nltk
 from scipy.optimize import minimize_scalar
 from pathlib import Path
+
+
+_HACI_LAYER_OBJECT = "object"
+_HACI_LAYER_ATTRIBUTE = "attribute"
+_HACI_LAYER_FUNCTIONAL = "functional"
+_HACI_KNOWN_LAYERS = {_HACI_LAYER_OBJECT, _HACI_LAYER_ATTRIBUTE, _HACI_LAYER_FUNCTIONAL}
+
+
+def _ensure_nltk_pos_tagger():
+    """Ensure NLTK taggers required for HACI are present."""
+
+    try:
+        nltk.data.find("taggers/averaged_perceptron_tagger")
+    except LookupError:
+        nltk.download("averaged_perceptron_tagger", quiet=True)
+    try:
+        nltk.data.find("help/tagsets/universal_tagset.pickle")
+    except LookupError:
+        nltk.download("universal_tagset", quiet=True)
+
+
+def _tokens_to_words(tokens):
+    """Group subword tokens into coarse words for POS tagging."""
+
+    words, groups = [], []
+    buffer_tokens, buffer_pieces = [], []
+
+    def flush():
+        if not buffer_tokens:
+            return
+        word = "".join(buffer_pieces).strip()
+        if word:
+            words.append(word)
+            groups.append(list(buffer_tokens))
+        buffer_tokens.clear()
+        buffer_pieces.clear()
+
+    for idx, token in enumerate(tokens):
+        normalized = token.replace("▁", " ").replace("Ġ", " ").replace("Ċ", " ")
+        starts_new = token.startswith(("▁", "Ġ")) or token == "Ċ"
+        if starts_new and buffer_tokens:
+            flush()
+        if not buffer_tokens:
+            buffer_tokens.append(idx)
+            buffer_pieces.append(normalized)
+        else:
+            buffer_tokens.append(idx)
+            buffer_pieces.append(normalized)
+    flush()
+
+    return words, groups
+
+
+def _assign_layers(tokens):
+    """Assign HACI layers to each token via POS tagging."""
+
+    layers = [_HACI_LAYER_FUNCTIONAL for _ in tokens]
+    words, groups = _tokens_to_words(tokens)
+    if not words:
+        return layers
+
+    _ensure_nltk_pos_tagger()
+    try:
+        tagged = nltk.pos_tag(words, tagset="universal")
+    except LookupError:
+        tagged = [(w, "NOUN") for w in words]
+
+    pos_to_layer = {
+        "NOUN": _HACI_LAYER_OBJECT,
+        "PROPN": _HACI_LAYER_OBJECT,
+        "ADJ": _HACI_LAYER_ATTRIBUTE,
+        "VERB": _HACI_LAYER_ATTRIBUTE,
+        "ADV": _HACI_LAYER_ATTRIBUTE,
+        "NUM": _HACI_LAYER_ATTRIBUTE,
+        "PRON": _HACI_LAYER_FUNCTIONAL,
+        "DET": _HACI_LAYER_FUNCTIONAL,
+        "ADP": _HACI_LAYER_FUNCTIONAL,
+        "AUX": _HACI_LAYER_FUNCTIONAL,
+        "PART": _HACI_LAYER_FUNCTIONAL,
+        "CONJ": _HACI_LAYER_FUNCTIONAL,
+        "SCONJ": _HACI_LAYER_FUNCTIONAL,
+        "CCONJ": _HACI_LAYER_FUNCTIONAL,
+        "PUNCT": _HACI_LAYER_FUNCTIONAL,
+        "INTJ": _HACI_LAYER_FUNCTIONAL,
+        "X": _HACI_LAYER_FUNCTIONAL,
+    }
+
+    for (_, pos), token_indices in zip(tagged, groups):
+        layer = pos_to_layer.get(pos, _HACI_LAYER_FUNCTIONAL)
+        for idx in token_indices:
+            if 0 <= idx < len(layers):
+                layers[idx] = layer
+
+    return layers
+
+
+def _object_attention_interference(maps, weights):
+    stacked = np.stack(maps, axis=0)
+    weights = np.maximum(np.asarray(weights, dtype=np.float64), 0.0)
+    if weights.sum() <= 1e-8:
+        weights = np.ones_like(weights) / len(weights)
+    else:
+        weights = weights / (weights.sum() + 1e-8)
+
+    stacked_norm = stacked / (stacked.max(axis=1, keepdims=True) + 1e-6)
+    conv1 = stacked_norm * weights[:, None]
+    conv2 = np.maximum(conv1, 0.0)
+    logits = conv2 - conv2.max(axis=0, keepdims=True)
+    attn = np.exp(logits)
+    attn = attn / (attn.sum(axis=0, keepdims=True) + 1e-8)
+    return (attn * stacked).sum(axis=0)
+
+
+def _linear_interference(maps, weights):
+    stacked = np.stack(maps, axis=0)
+    weights = np.maximum(np.asarray(weights, dtype=np.float64), 0.0)
+    if weights.sum() <= 1e-8:
+        weights = np.ones_like(weights) / len(weights)
+    else:
+        weights = weights / (weights.sum() + 1e-8)
+    return (stacked * weights[:, None]).sum(axis=0)
+
+
+def _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx):
+    if current_idx >= len(txt_tokens):
+        return None
+
+    target_token = txt_tokens[current_idx]
+    candidate_indices = []
+    for idx in range(current_idx):
+        if idx >= len(img_store):
+            break
+        entry = img_store[idx]
+        if entry is None:
+            continue
+        if idx < len(txt_tokens) and txt_tokens[idx] == target_token:
+            continue
+        candidate_indices.append(idx)
+
+    if not candidate_indices:
+        return None
+
+    layer_maps = {_HACI_LAYER_OBJECT: [], _HACI_LAYER_ATTRIBUTE: [], _HACI_LAYER_FUNCTIONAL: []}
+    layer_weights = {_HACI_LAYER_OBJECT: [], _HACI_LAYER_ATTRIBUTE: [], _HACI_LAYER_FUNCTIONAL: []}
+
+    if len(txt_scores) < len(txt_tokens):
+        txt_scores = np.pad(txt_scores, (0, len(txt_tokens) - len(txt_scores)), constant_values=0.0)
+
+    for idx in candidate_indices:
+        entry = img_store[idx]
+        if entry is None or entry.get("map") is None:
+            continue
+        layer = entry.get("layer", _HACI_LAYER_FUNCTIONAL)
+        if layer not in _HACI_KNOWN_LAYERS:
+            layer = _HACI_LAYER_FUNCTIONAL
+        weight = float(txt_scores[idx]) if idx < len(txt_scores) else 0.0
+        layer_maps[layer].append(entry["map"])
+        layer_weights[layer].append(max(weight, 0.0))
+
+    interference_components = {}
+    for layer, maps in layer_maps.items():
+        if not maps:
+            continue
+        weights = layer_weights[layer]
+        if layer == _HACI_LAYER_OBJECT:
+            interference_components[layer] = _object_attention_interference(maps, weights)
+        else:
+            interference_components[layer] = _linear_interference(maps, weights)
+
+    if not interference_components:
+        return None
+
+    strengths = {layer: sum(layer_weights[layer]) for layer in interference_components}
+    total_strength = sum(strengths.values())
+    if total_strength <= 1e-8:
+        gating = {layer: 1.0 / len(interference_components) for layer in interference_components}
+    else:
+        gating = {layer: strengths[layer] / (total_strength + 1e-8) for layer in interference_components}
+
+    template = next(iter(interference_components.values()))
+    total_interference = np.zeros_like(template)
+    for layer, comp in interference_components.items():
+        total_interference += gating[layer] * comp
+
+    return total_interference
 
 
 def rank_guassian_filter(img, kernel_size=3):
@@ -441,7 +627,7 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
         processor, save_fn, target_token, img_scores_list, eval_only=False):
 
     """
-    Generate a Token Activation Map (TAM) with optional Estimated Causal Inference (ECI) 
+    Generate a Token Activation Map (TAM) with Hierarchical and Adaptive Causal Inference (HACI)
     and Rank Guassian Filter for high quality MLLM visual explaination.
 
     Args:
@@ -460,8 +646,8 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
         processor: The model processor to convert tokens to text.
         save_fn (str): File path to save the visualization image (optional).
         target_token (int or tuple): The token index or (round_idx, prompt_token_idx) to explain.
-        img_scores_list (list): List to accumulate image maps used in Estimated Causal Inference.
-            Note: need to define a empty list for the first round of each example.
+        img_scores_list (list): Mutable list used by HACI to cache per-token activation maps and layers.
+            Note: start with an empty list for the first round of each example.
         eval_only (bool): Whether to run in evaluation mode (affects visualization size).
 
     Returns:
@@ -474,8 +660,7 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
     4. For round 0, recursively process all prompt tokens to generate maps.
     5. Extract the logits for the target token's predicted class and compute relevance scores 
        over prompt, answer, and image tokens.
-    6. Use Estimated Causal Inference (ECI) with least squares to reduce interference 
-       from repeated tokens in the textual input.
+    6. Apply HACI to estimate and remove structured interference from earlier context tokens.
     7. Prepare vision input images or frames for visualization.
     8. Identify top candidate tokens to provide context in visualization.
     9. Call multimodal_process to generate the visual explanation map (TAM).
@@ -507,6 +692,7 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
     answer = processor.tokenizer.tokenize(processor.batch_decode([tokens[answer_idx[0] + 1:]], \
             skip_special_tokens=False, clean_up_tokenization_spaces=False)[0])
     txt_all = prompt + answer
+    token_layers = _assign_layers(txt_all)
 
     # round_idx indicates the round of generation, this_token_idx is for the exaplained target token
     round_idx = -1
@@ -571,26 +757,22 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
     else:
         img_scores = scores[img_idx]
 
-    # save img_scores for next Estimated Causal Inference
-    img_scores_list.append(img_scores)
+    img_scores = np.array(img_scores, copy=True)
+    layer_idx = min(vis_token_idx, len(token_layers) - 1) if token_layers else 0
+    current_layer = token_layers[layer_idx] if token_layers else _HACI_LAYER_FUNCTIONAL
 
-    # exclude the same words in ECI
-    if len(img_scores_list) > 1 and vis_token_idx < len(txt_all):
-        non_repeat_idx = []
-        for i in range(vis_token_idx):
-            if i < len(txt_all) and txt_all[i] != txt_all[vis_token_idx]:
-                non_repeat_idx.append(i)
-        txt_scores_ = txt_scores[non_repeat_idx]
-        img_scores_list_ = [img_scores_list[_] for _ in non_repeat_idx]
+    while len(img_scores_list) <= vis_token_idx:
+        img_scores_list.append(None)
+    img_scores_list[vis_token_idx] = {"map": img_scores.copy(), "layer": current_layer}
 
-        # get the interference map of ECI
-        w = txt_scores_
-        w = w / (w.sum() + 1e-8)
-        interf_img_scores = (np.stack(img_scores_list_, 0) * w.reshape(-1, 1)).sum(0)
-
-        # apply ECI with the least squares method and relu
-        scaled_map = least_squares(img_scores, interf_img_scores)
-        img_scores = (img_scores - interf_img_scores * scaled_map).clip(min=0)
+    interference = None
+    if vis_token_idx < len(txt_all):
+        interference = _compute_haci_interference(txt_all, txt_scores, img_scores_list, vis_token_idx)
+    if interference is not None and np.any(interference):
+        scaled_map = least_squares(img_scores, interference)
+        if not np.isfinite(scaled_map) or scaled_map < 0:
+            scaled_map = 0.0
+        img_scores = (img_scores - interference * scaled_map).clip(min=0)
 
     # prepare raw vision input
     if isinstance(vision_shape[0], tuple):
