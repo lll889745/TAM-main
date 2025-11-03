@@ -1,4 +1,4 @@
-import os, torch, cv2, subprocess, shutil
+import os, torch, cv2, subprocess, shutil, copy
 import numpy as np
 import nltk
 from scipy.optimize import minimize_scalar
@@ -24,12 +24,30 @@ def _env_flag(name, default=True):
     return str(val).lower() not in {"0", "false", "no"}
 
 
+def _env_float(name, default):
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
 _DEFAULT_INTERFERENCE_MODE = os.environ.get("TAM_INTERFERENCE_MODE", "haci").lower()
+_DEFAULT_HACI_LAYER_PRIORS = {
+    _HACI_LAYER_OBJECT: _env_float("TAM_HACI_PRIOR_OBJECT", 1.0),
+    _HACI_LAYER_ATTRIBUTE: _env_float("TAM_HACI_PRIOR_ATTRIBUTE", 0.65),
+    _HACI_LAYER_FUNCTIONAL: _env_float("TAM_HACI_PRIOR_FUNCTIONAL", 0.35),
+}
 _DEFAULT_HACI_CONFIG = {
     "use_object_attention": _env_flag("TAM_HACI_OBJ_ATT", True),
     "include_attribute_layer": _env_flag("TAM_HACI_ATTR", True),
     "include_functional_layer": _env_flag("TAM_HACI_FUNC", True),
     "use_layer_gating": _env_flag("TAM_HACI_GATE", True),
+    "layer_priors": dict(_DEFAULT_HACI_LAYER_PRIORS),
+    "max_interference_scale": _env_float("TAM_HACI_MAX_SCALE", 1.5),
+    "residual_ratio": _env_float("TAM_HACI_RESIDUAL", 0.1),
 }
 
 
@@ -209,19 +227,31 @@ def _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx, h
         return None
 
     strengths = {layer: sum(layer_weights[layer]) for layer in interference_components}
-    total_strength = sum(strengths.values())
+    layer_priors = haci_cfg.get("layer_priors", {}) or {}
+    weighted_strengths = {}
+    for layer, strength in strengths.items():
+        prior = layer_priors.get(layer, 1.0)
+        weighted_strengths[layer] = max(strength, 0.0) * max(prior, 0.0)
+
+    available_layers = list(interference_components.keys())
     if haci_cfg.get("use_layer_gating", True):
-        if total_strength <= 1e-8:
-            gating = {layer: 1.0 / len(interference_components) for layer in interference_components}
+        total_weight = sum(weighted_strengths.get(layer, 0.0) for layer in available_layers)
+        if total_weight <= 1e-8:
+            gating = {layer: 1.0 / len(available_layers) for layer in available_layers}
         else:
-            gating = {layer: strengths[layer] / (total_strength + 1e-8) for layer in interference_components}
+            gating = {layer: weighted_strengths.get(layer, 0.0) / (total_weight + 1e-8) for layer in available_layers}
     else:
-        gating = {layer: 1.0 / len(interference_components) for layer in interference_components}
+        fixed_weights = {layer: max(layer_priors.get(layer, 1.0), 0.0) for layer in available_layers}
+        total_weight = sum(fixed_weights.values())
+        if total_weight <= 1e-8:
+            gating = {layer: 1.0 / len(available_layers) for layer in available_layers}
+        else:
+            gating = {layer: fixed_weights[layer] / (total_weight + 1e-8) for layer in available_layers}
 
     template = next(iter(interference_components.values()))
     total_interference = np.zeros_like(template)
     for layer, comp in interference_components.items():
-        total_interference += gating[layer] * comp
+        total_interference += gating.get(layer, 0.0) * comp
 
     return total_interference
 
@@ -793,9 +823,17 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
 
     if interference_mode is None:
         interference_mode = _DEFAULT_INTERFERENCE_MODE
-    haci_cfg = dict(_DEFAULT_HACI_CONFIG)
+    haci_cfg = copy.deepcopy(_DEFAULT_HACI_CONFIG)
     if haci_config:
-        haci_cfg.update(haci_config)
+        custom_priors = haci_config.get("layer_priors") if isinstance(haci_config, dict) else None
+        if custom_priors:
+            base_priors = haci_cfg.get("layer_priors", {}).copy()
+            base_priors.update(custom_priors)
+            haci_cfg["layer_priors"] = base_priors
+        for key, value in haci_config.items():
+            if key == "layer_priors":
+                continue
+            haci_cfg[key] = value
 
     # round_idx indicates the round of generation, this_token_idx is for the exaplained target token
     round_idx = -1
@@ -862,21 +900,34 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
         img_scores = scores[img_idx]
 
     img_scores = np.array(img_scores, copy=True)
+    raw_img_scores = img_scores.copy()
     layer_idx = min(vis_token_idx, len(token_layers) - 1) if token_layers else 0
     current_layer = token_layers[layer_idx] if token_layers else _HACI_LAYER_FUNCTIONAL
 
     while len(img_scores_list) <= vis_token_idx:
         img_scores_list.append(None)
-    img_scores_list[vis_token_idx] = {"map": img_scores.copy(), "layer": current_layer}
 
     interference = None
     if vis_token_idx < len(txt_all):
         interference = _compute_interference(interference_mode, txt_all, txt_scores, img_scores_list, vis_token_idx, haci_cfg)
     if interference is not None and np.any(interference):
         scaled_map = least_squares(img_scores, interference)
+        max_scale = max(haci_cfg.get("max_interference_scale", 1.5), 0.0)
         if not np.isfinite(scaled_map) or scaled_map < 0:
             scaled_map = 0.0
+        scaled_map = min(scaled_map, max_scale)
         img_scores = (img_scores - interference * scaled_map).clip(min=0)
+        residual_ratio = haci_cfg.get("residual_ratio", 0.0)
+        if residual_ratio > 0:
+            residual_ratio = max(0.0, min(residual_ratio, 1.0))
+            positive_interference = np.maximum(interference, 0.0)
+            img_scores = img_scores + positive_interference * residual_ratio
+
+    img_scores_list[vis_token_idx] = {
+        "map": img_scores.copy(),
+        "layer": current_layer,
+        "raw_map": raw_img_scores,
+    }
 
     # prepare raw vision input
     if isinstance(vision_shape[0], tuple):
