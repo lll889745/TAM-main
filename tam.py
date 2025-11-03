@@ -37,8 +37,8 @@ def _env_float(name, default):
 _DEFAULT_INTERFERENCE_MODE = os.environ.get("TAM_INTERFERENCE_MODE", "haci").lower()
 _DEFAULT_HACI_LAYER_PRIORS = {
     _HACI_LAYER_OBJECT: _env_float("TAM_HACI_PRIOR_OBJECT", 1.0),
-    _HACI_LAYER_ATTRIBUTE: _env_float("TAM_HACI_PRIOR_ATTRIBUTE", 0.65),
-    _HACI_LAYER_FUNCTIONAL: _env_float("TAM_HACI_PRIOR_FUNCTIONAL", 0.35),
+    _HACI_LAYER_ATTRIBUTE: _env_float("TAM_HACI_PRIOR_ATTRIBUTE", 0.7),
+    _HACI_LAYER_FUNCTIONAL: _env_float("TAM_HACI_PRIOR_FUNCTIONAL", 0.75),
 }
 _DEFAULT_HACI_CONFIG = {
     "use_object_attention": _env_flag("TAM_HACI_OBJ_ATT", True),
@@ -46,8 +46,8 @@ _DEFAULT_HACI_CONFIG = {
     "include_functional_layer": _env_flag("TAM_HACI_FUNC", True),
     "use_layer_gating": _env_flag("TAM_HACI_GATE", True),
     "layer_priors": dict(_DEFAULT_HACI_LAYER_PRIORS),
-    "max_interference_scale": _env_float("TAM_HACI_MAX_SCALE", 1.5),
-    "residual_ratio": _env_float("TAM_HACI_RESIDUAL", 0.1),
+    "max_interference_scale": _env_float("TAM_HACI_MAX_SCALE", 2.5),
+    "residual_ratio": _env_float("TAM_HACI_RESIDUAL", 0.35),
 }
 
 
