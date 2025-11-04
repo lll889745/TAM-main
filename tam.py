@@ -37,8 +37,8 @@ def _env_float(name, default):
 _DEFAULT_INTERFERENCE_MODE = os.environ.get("TAM_INTERFERENCE_MODE", "haci").lower()
 _DEFAULT_HACI_LAYER_PRIORS = {
     _HACI_LAYER_OBJECT: _env_float("TAM_HACI_PRIOR_OBJECT", 1.0),
-    _HACI_LAYER_ATTRIBUTE: _env_float("TAM_HACI_PRIOR_ATTRIBUTE", 0.7),
-    _HACI_LAYER_FUNCTIONAL: _env_float("TAM_HACI_PRIOR_FUNCTIONAL", 0.75),
+    _HACI_LAYER_ATTRIBUTE: _env_float("TAM_HACI_PRIOR_ATTRIBUTE", 0.8),
+    _HACI_LAYER_FUNCTIONAL: _env_float("TAM_HACI_PRIOR_FUNCTIONAL", 0.95),
 }
 _DEFAULT_HACI_CONFIG = {
     "use_object_attention": _env_flag("TAM_HACI_OBJ_ATT", True),
@@ -46,8 +46,8 @@ _DEFAULT_HACI_CONFIG = {
     "include_functional_layer": _env_flag("TAM_HACI_FUNC", True),
     "use_layer_gating": _env_flag("TAM_HACI_GATE", True),
     "layer_priors": dict(_DEFAULT_HACI_LAYER_PRIORS),
-    "max_interference_scale": _env_float("TAM_HACI_MAX_SCALE", 2.5),
-    "residual_ratio": _env_float("TAM_HACI_RESIDUAL", 0.35),
+    "max_interference_scale": _env_float("TAM_HACI_MAX_SCALE", 3.0),
+    "residual_ratio": _env_float("TAM_HACI_RESIDUAL", 0.5),
 }
 
 
@@ -834,6 +834,12 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
             if key == "layer_priors":
                 continue
             haci_cfg[key] = value
+    is_haci_mode = (interference_mode == "haci")
+    if not is_haci_mode:
+        haci_cfg["max_interference_scale"] = float("inf")
+        haci_cfg["residual_ratio"] = 0.0
+        haci_cfg["use_layer_gating"] = False
+        haci_cfg["layer_priors"] = {_HACI_LAYER_OBJECT: 1.0, _HACI_LAYER_ATTRIBUTE: 1.0, _HACI_LAYER_FUNCTIONAL: 1.0}
 
     # round_idx indicates the round of generation, this_token_idx is for the exaplained target token
     round_idx = -1
