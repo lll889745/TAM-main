@@ -48,7 +48,8 @@ _DEFAULT_HACI_CONFIG = {
     "layer_priors": dict(_DEFAULT_HACI_LAYER_PRIORS),
     "max_interference_scale": _env_float("TAM_HACI_MAX_SCALE", 3.0),
     "residual_ratio": _env_float("TAM_HACI_RESIDUAL", 0.5),
-    "object_gain": _env_float("TAM_HACI_OBJECT_GAIN", 1.2),
+    "object_gain": _env_float("TAM_HACI_OBJECT_GAIN", 1.3),
+    "layer_focus_gain": _env_float("TAM_HACI_LAYER_FOCUS", 1.15),
 }
 
 
@@ -171,7 +172,7 @@ def _linear_interference(maps, weights):
     return (stacked * weights[:, None]).sum(axis=0)
 
 
-def _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx, haci_cfg):
+def _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx, haci_cfg, target_layer=None):
     if current_idx >= len(txt_tokens):
         return None
 
@@ -253,6 +254,14 @@ def _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx, h
         else:
             gating = {layer: fixed_weights[layer] / (total_weight + 1e-8) for layer in available_layers}
 
+    focus_gain = max(haci_cfg.get("layer_focus_gain", 1.0), 0.0)
+    if focus_gain > 1.0 and target_layer in gating:
+        gating[target_layer] *= focus_gain
+        norm = sum(gating.values())
+        if norm > 1e-8:
+            for layer in gating:
+                gating[layer] /= norm
+
     template = next(iter(interference_components.values()))
     total_interference = np.zeros_like(template)
     for layer, comp in interference_components.items():
@@ -292,7 +301,7 @@ def _compute_eci_interference(txt_tokens, txt_scores, img_store, current_idx):
     return (np.stack(maps, axis=0) * weights[:, None]).sum(axis=0)
 
 
-def _compute_interference(mode, txt_tokens, txt_scores, img_store, current_idx, haci_cfg):
+def _compute_interference(mode, txt_tokens, txt_scores, img_store, current_idx, haci_cfg, target_layer=None):
     mode = (mode or "").lower()
     if mode not in {"haci", "eci", "none"}:
         mode = "haci"
@@ -300,7 +309,7 @@ def _compute_interference(mode, txt_tokens, txt_scores, img_store, current_idx, 
         return None
     if mode == "eci":
         return _compute_eci_interference(txt_tokens, txt_scores, img_store, current_idx)
-    return _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx, haci_cfg)
+    return _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx, haci_cfg, target_layer=target_layer)
 
 
 def rank_guassian_filter(img, kernel_size=3):
@@ -846,6 +855,7 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
         haci_cfg["use_layer_gating"] = False
         haci_cfg["layer_priors"] = {_HACI_LAYER_OBJECT: 1.0, _HACI_LAYER_ATTRIBUTE: 1.0, _HACI_LAYER_FUNCTIONAL: 1.0}
         haci_cfg["object_gain"] = 1.0
+        haci_cfg["layer_focus_gain"] = 1.0
 
     # round_idx indicates the round of generation, this_token_idx is for the exaplained target token
     round_idx = -1
@@ -921,7 +931,15 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
 
     interference = None
     if vis_token_idx < len(txt_all):
-        interference = _compute_interference(interference_mode, txt_all, txt_scores, img_scores_list, vis_token_idx, haci_cfg)
+        interference = _compute_interference(
+            interference_mode,
+            txt_all,
+            txt_scores,
+            img_scores_list,
+            vis_token_idx,
+            haci_cfg,
+            target_layer=current_layer,
+        )
     if interference is not None and np.any(interference):
         scaled_map = least_squares(img_scores, interference)
         max_scale = max(haci_cfg.get("max_interference_scale", 1.5), 0.0)
