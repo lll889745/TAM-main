@@ -50,7 +50,7 @@ _DEFAULT_HACI_CONFIG = {
     "residual_ratio": _env_float("TAM_HACI_RESIDUAL", 0.55),
     "object_gain": _env_float("TAM_HACI_OBJECT_GAIN", 1.3),
     "layer_focus_gain": _env_float("TAM_HACI_LAYER_FOCUS", 1.25),
-    "functional_focus_gain": _env_float("TAM_HACI_FUNC_FOCUS", 1.6),
+    "functional_focus_gain": _env_float("TAM_HACI_FUNC_FOCUS", 1.5),
 }
 
 
