@@ -36,9 +36,9 @@ def _env_float(name, default):
 
 _DEFAULT_INTERFERENCE_MODE = os.environ.get("TAM_INTERFERENCE_MODE", "haci").lower()
 _DEFAULT_HACI_LAYER_PRIORS = {
-    _HACI_LAYER_OBJECT: _env_float("TAM_HACI_PRIOR_OBJECT", 1.25),
+    _HACI_LAYER_OBJECT: _env_float("TAM_HACI_PRIOR_OBJECT", 1.35),
     _HACI_LAYER_ATTRIBUTE: _env_float("TAM_HACI_PRIOR_ATTRIBUTE", 0.85),
-    _HACI_LAYER_FUNCTIONAL: _env_float("TAM_HACI_PRIOR_FUNCTIONAL", 0.85),
+    _HACI_LAYER_FUNCTIONAL: _env_float("TAM_HACI_PRIOR_FUNCTIONAL", 0.9),
 }
 _DEFAULT_HACI_CONFIG = {
     "use_object_attention": _env_flag("TAM_HACI_OBJ_ATT", True),
@@ -48,8 +48,9 @@ _DEFAULT_HACI_CONFIG = {
     "layer_priors": dict(_DEFAULT_HACI_LAYER_PRIORS),
     "max_interference_scale": _env_float("TAM_HACI_MAX_SCALE", 3.0),
     "residual_ratio": _env_float("TAM_HACI_RESIDUAL", 0.5),
-    "object_gain": _env_float("TAM_HACI_OBJECT_GAIN", 1.3),
-    "layer_focus_gain": _env_float("TAM_HACI_LAYER_FOCUS", 1.15),
+    "object_gain": _env_float("TAM_HACI_OBJECT_GAIN", 1.35),
+    "layer_focus_gain": _env_float("TAM_HACI_LAYER_FOCUS", 1.25),
+    "functional_focus_gain": _env_float("TAM_HACI_FUNC_FOCUS", 1.35),
 }
 
 
@@ -255,8 +256,11 @@ def _compute_haci_interference(txt_tokens, txt_scores, img_store, current_idx, h
             gating = {layer: fixed_weights[layer] / (total_weight + 1e-8) for layer in available_layers}
 
     focus_gain = max(haci_cfg.get("layer_focus_gain", 1.0), 0.0)
-    if focus_gain > 1.0 and target_layer in gating:
-        gating[target_layer] *= focus_gain
+    target_focus_gain = focus_gain
+    if target_layer == _HACI_LAYER_FUNCTIONAL:
+        target_focus_gain = max(target_focus_gain, haci_cfg.get("functional_focus_gain", 1.0))
+    if target_focus_gain > 1.0 and target_layer in gating:
+        gating[target_layer] *= target_focus_gain
         norm = sum(gating.values())
         if norm > 1e-8:
             for layer in gating:
@@ -856,6 +860,7 @@ def TAM(tokens, vision_shape, logit_list, special_ids, vision_input, \
         haci_cfg["layer_priors"] = {_HACI_LAYER_OBJECT: 1.0, _HACI_LAYER_ATTRIBUTE: 1.0, _HACI_LAYER_FUNCTIONAL: 1.0}
         haci_cfg["object_gain"] = 1.0
         haci_cfg["layer_focus_gain"] = 1.0
+        haci_cfg["functional_focus_gain"] = 1.0
 
     # round_idx indicates the round of generation, this_token_idx is for the exaplained target token
     round_idx = -1
