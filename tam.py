@@ -47,10 +47,10 @@ _DEFAULT_HACI_CONFIG = {
     "use_layer_gating": _env_flag("TAM_HACI_GATE", True),
     "layer_priors": dict(_DEFAULT_HACI_LAYER_PRIORS),
     "max_interference_scale": _env_float("TAM_HACI_MAX_SCALE", 3.0),
-    "residual_ratio": _env_float("TAM_HACI_RESIDUAL", 0.55),
+    "residual_ratio": _env_float("TAM_HACI_RESIDUAL", 0.5),
     "object_gain": _env_float("TAM_HACI_OBJECT_GAIN", 1.3),
     "layer_focus_gain": _env_float("TAM_HACI_LAYER_FOCUS", 1.25),
-    "functional_focus_gain": _env_float("TAM_HACI_FUNC_FOCUS", 1.5),
+    "functional_focus_gain": _env_float("TAM_HACI_FUNC_FOCUS", 1.45),
 }
 
 
